@@ -902,56 +902,7 @@ def to_excel_bytes(recommendations, singles, summary, academy_conflicts=None):
 
 
 def demo_raw_dataframe():
-    return pd.DataFrame([
-        {
-            "Name": "Alex Rivera",
-            "Academy": "Freestyle Grapplerz",
-            "Status": "Approved",
-            "Group": "No-Gi / Beginner / Teen / 120 - 130 lbs",
-        },
-        {
-            "Name": "Jordan Lee",
-            "Academy": "Oliveira Grappling",
-            "Status": "Approved",
-            "Group": "No-Gi / Beginner / Youth 10-11 / 50 - 59 lbs",
-        },
-        {
-            "Name": "Sam Patel",
-            "Academy": "Oliveira Grappling",
-            "Status": "Approved",
-            "Group": "No-Gi / Beginner / Youth 10-11 / 50 - 59 lbs",
-        },
-        {
-            "Name": "Cameron Diaz",
-            "Academy": "West End Grappling",
-            "Status": "Approved",
-            "Group": "No-Gi / Beginner / Youth 10-11 / 60 - 69 lbs",
-        },
-        {
-            "Name": "Devon Brooks",
-            "Academy": "Northside MMA",
-            "Status": "Approved",
-            "Group": "No-Gi / Beginner / Youth 10-11 / 60 - 69 lbs",
-        },
-        {
-            "Name": "Eli Carter",
-            "Academy": "Mat Factory",
-            "Status": "Approved",
-            "Group": "No-Gi / Beginner / Youth 10-11 / 60 - 69 lbs",
-        },
-        {
-            "Name": "Taylor Smith",
-            "Academy": "Freestyle Grapplerz",
-            "Status": "Approved",
-            "Group": "No-Gi / Beginner / Teen / 140 - 150 lbs",
-        },
-        {
-            "Name": "Morgan Chen",
-            "Academy": "Eastside Combat",
-            "Status": "Pending",
-            "Group": "Gi / White / Adult / 150 - 160 lbs",
-        },
-    ])
+    return pd.read_csv("smoothcomp_sample.csv")
 
 
 def universal_demo_dataframe():
@@ -1014,8 +965,8 @@ def universal_demo_dataframe():
 
 
 def sample_csv_bytes():
-    sample = demo_raw_dataframe()
-    return sample.to_csv(index=False).encode("utf-8")
+    with open("smoothcomp_sample.csv", "rb") as f:
+        return f.read()
 
 
 def check_move_back_alerts(moves, current_summary):
