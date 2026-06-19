@@ -1519,8 +1519,8 @@ if data_ready:
 
         st.divider()
         _note_labels = [
-            f"{m['athlete_name']} \u2192 {m['new_division']} ({m['timestamp']})"
-            for m in st.session_state["moves"]
+            f"{i + 1}. {m['athlete_name']} \u2192 {m['new_division']} ({m['timestamp']})"
+            for i, m in enumerate(st.session_state["moves"])
         ]
         _note_col1, _note_col2, _note_col3 = st.columns([2, 3, 1])
         with _note_col1:
@@ -1536,6 +1536,7 @@ if data_ready:
             if st.button("Save Notes", key="save_notes_btn"):
                 _note_idx = _note_labels.index(_selected_note)
                 st.session_state["moves"][_note_idx]["director_notes"] = _new_note
+                st.session_state["notes_text_input"] = ""
                 st.rerun()
 
         _active_moves_for_revert = [
@@ -1544,8 +1545,8 @@ if data_ready:
         ]
         if _active_moves_for_revert:
             _revert_labels = [
-                f"{m['athlete_name']} \u2192 {m['new_division']}"
-                for _, m in _active_moves_for_revert
+                f"{_idx + 1}. {m['athlete_name']} \u2192 {m['new_division']}"
+                for _idx, m in _active_moves_for_revert
             ]
             _revert_col1, _revert_col2 = st.columns([4, 1])
             with _revert_col1:
