@@ -1,4 +1,6 @@
+import hashlib
 import re
+from datetime import datetime
 from io import BytesIO
 
 import pandas as pd
@@ -1016,6 +1018,26 @@ def sample_csv_bytes():
     return sample.to_csv(index=False).encode("utf-8")
 
 
+def check_move_back_alerts(moves, current_summary):
+    alerts = []
+    for move in moves:
+        if move["status"] != "Active":
+            continue
+        original_div = move["original_division"]
+        athlete = move["athlete_name"]
+        match = current_summary[current_summary["group"] == original_div]
+        if match.empty:
+            continue
+        athlete_count = int(match.iloc[0]["athletes"])
+        if athlete_count >= 2:
+            alerts.append(
+                f"Move Alert \u2014 {athlete} was moved out of \u201c{original_div}\u201d. "
+                f"That division now has {athlete_count} athlete(s) and may be viable without the move. "
+                "Review in the Move Log below."
+            )
+    return alerts
+
+
 def metric_card(label, value, help_text):
     st.markdown(
         f'''
@@ -1068,6 +1090,7 @@ import_mode = st.radio(
 uploaded = None
 data_ready = False
 df = None
+hash_changed = False
 
 if import_mode == "Use Sample Smoothcomp Data":
     raw_df = demo_raw_dataframe()
@@ -1093,7 +1116,13 @@ else:
     uploaded = st.file_uploader("Upload registrations CSV", type=["csv"])
 
     if uploaded:
-        raw_df = pd.read_csv(uploaded)
+        _file_bytes = uploaded.getvalue()
+        _new_hash = hashlib.md5(_file_bytes).hexdigest()
+        _prev_hash = st.session_state.get("csv_hash", "")
+        if _new_hash != _prev_hash and _prev_hash != "":
+            hash_changed = True
+        st.session_state["csv_hash"] = _new_hash
+        raw_df = pd.read_csv(BytesIO(_file_bytes))
 
         if import_mode == "Smoothcomp Auto-Detect":
             df = normalize_dataframe(raw_df)
@@ -1145,6 +1174,10 @@ else:
             st.markdown("</div>", unsafe_allow_html=True)
 
 if data_ready:
+    if "moves" not in st.session_state:
+        st.session_state["moves"] = []
+    if "move_back_alerts" not in st.session_state:
+        st.session_state["move_back_alerts"] = []
 
     with st.sidebar:
         st.header("Settings")
@@ -1187,6 +1220,15 @@ if data_ready:
             working_df = approved_df
 
     summary = group_summary(working_df)
+
+    if hash_changed:
+        if st.session_state.get("moves"):
+            st.session_state["move_back_alerts"] = check_move_back_alerts(
+                st.session_state["moves"], summary
+            )
+        else:
+            st.session_state["move_back_alerts"] = []
+
     singles = summary[summary["athletes"] == 1].copy()
 
     recommendations = make_recommendations(
@@ -1218,6 +1260,9 @@ if data_ready:
         if not report.empty and "Risk Badge" in report.columns:
             high_confidence_count += report["Risk Badge"].astype(str).eq("Safe Match").sum()
             do_not_match_count += report["Risk Badge"].astype(str).eq("Do Not Match").sum()
+
+    for _alert_msg in st.session_state.get("move_back_alerts", []):
+        st.warning(_alert_msg)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1299,12 +1344,58 @@ if data_ready:
                 filtered_recommendations["Athlete"] == selected_athlete
             ]
 
+        if st.session_state.get("moves"):
+            _active_move_keys = {
+                (m["athlete_name"], m["original_division"])
+                for m in st.session_state["moves"]
+                if m["status"] == "Active"
+            }
+            filtered_recommendations = filtered_recommendations[
+                ~filtered_recommendations.apply(
+                    lambda r: (r["Athlete"], r["Current Division"]) in _active_move_keys,
+                    axis=1,
+                )
+            ]
+
         best_matches = filtered_recommendations[filtered_recommendations["Rank"] == 1].copy()
 
         tab1, tab2, tab3 = st.tabs(["Best Match Only", "All Suggestions", "Export"])
 
         with tab1:
             st.dataframe(style_quality_rows(best_matches), use_container_width=True)
+
+            if not best_matches.empty:
+                st.divider()
+                _accept_col1, _accept_col2 = st.columns([4, 1])
+                _accept_options = ["— select athlete —"] + sorted(
+                    best_matches["Athlete"].dropna().unique().tolist()
+                )
+                with _accept_col1:
+                    _athlete_to_accept = st.selectbox(
+                        "Accept a move:",
+                        _accept_options,
+                        key="accept_athlete_selectbox",
+                    )
+                with _accept_col2:
+                    st.write("")
+                    _accept_clicked = st.button(
+                        "\u2713 Accept Move",
+                        disabled=(_athlete_to_accept == "— select athlete —"),
+                        key="accept_move_btn",
+                    )
+                if _accept_clicked and _athlete_to_accept != "— select athlete —":
+                    _row = best_matches[best_matches["Athlete"] == _athlete_to_accept].iloc[0]
+                    st.session_state["moves"].append({
+                        "athlete_name": _athlete_to_accept,
+                        "original_division": str(_row["Current Division"]),
+                        "new_division": str(_row["Suggested Division"]),
+                        "score": int(_row["Match Score"]),
+                        "academy_warning": str(_row.get("Academy Warning", "")),
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "director_notes": "",
+                        "status": "Active",
+                    })
+                    st.rerun()
 
         with tab2:
             st.dataframe(style_quality_rows(filtered_recommendations), use_container_width=True)
@@ -1395,6 +1486,94 @@ if data_ready:
             st.dataframe(style_quality_rows(filtered_conflicts), use_container_width=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
+
+    if st.session_state.get("moves"):
+        _active_count = sum(1 for m in st.session_state["moves"] if m["status"] == "Active")
+        _total_count = len(st.session_state["moves"])
+
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("Move Log")
+        st.caption(
+            f"{_active_count} active move(s) \u00b7 {_total_count} total this session. "
+            "Accepted moves are removed from the recommendation table until reverted."
+        )
+
+        _move_df = pd.DataFrame(st.session_state["moves"])
+        _move_display = _move_df.rename(columns={
+            "athlete_name": "Athlete",
+            "original_division": "Original Division",
+            "new_division": "New Division",
+            "score": "Score",
+            "academy_warning": "Academy Warning",
+            "timestamp": "Accepted",
+            "director_notes": "Notes",
+            "status": "Status",
+        })
+        st.dataframe(
+            _move_display[[
+                "Athlete", "Original Division", "New Division",
+                "Score", "Academy Warning", "Accepted", "Notes", "Status",
+            ]],
+            use_container_width=True,
+        )
+
+        st.divider()
+        _note_labels = [
+            f"{m['athlete_name']} \u2192 {m['new_division']} ({m['timestamp']})"
+            for m in st.session_state["moves"]
+        ]
+        _note_col1, _note_col2, _note_col3 = st.columns([2, 3, 1])
+        with _note_col1:
+            _selected_note = st.selectbox("Add notes to:", _note_labels, key="notes_move_select")
+        with _note_col2:
+            _new_note = st.text_input(
+                "Notes:",
+                key="notes_text_input",
+                placeholder="Type director notes and click Save\u2026",
+            )
+        with _note_col3:
+            st.write("")
+            if st.button("Save Notes", key="save_notes_btn"):
+                _note_idx = _note_labels.index(_selected_note)
+                st.session_state["moves"][_note_idx]["director_notes"] = _new_note
+                st.rerun()
+
+        _active_moves_for_revert = [
+            (i, m) for i, m in enumerate(st.session_state["moves"])
+            if m["status"] == "Active"
+        ]
+        if _active_moves_for_revert:
+            _revert_labels = [
+                f"{m['athlete_name']} \u2192 {m['new_division']}"
+                for _, m in _active_moves_for_revert
+            ]
+            _revert_col1, _revert_col2 = st.columns([4, 1])
+            with _revert_col1:
+                _revert_choice = st.selectbox(
+                    "Revert a move:", _revert_labels, key="revert_move_select"
+                )
+            with _revert_col2:
+                st.write("")
+                if st.button("Revert", key="revert_move_btn"):
+                    for _ri, (_idx, _m) in enumerate(_active_moves_for_revert):
+                        if _revert_labels[_ri] == _revert_choice:
+                            st.session_state["moves"][_idx]["status"] = "Reverted"
+                            break
+                    st.rerun()
+
+        st.divider()
+        st.download_button(
+            "Download Move Log CSV",
+            data=to_csv_bytes(_move_display[[
+                "Athlete", "Original Division", "New Division",
+                "Score", "Academy Warning", "Accepted", "Notes", "Status",
+            ]]),
+            file_name="ez_brackets_move_log.csv",
+            mime="text/csv",
+            key="download_move_log_btn",
+        )
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
 else:
     st.markdown(
