@@ -1,4 +1,5 @@
 import hashlib
+import json
 import re
 from datetime import datetime
 from io import BytesIO
@@ -1053,6 +1054,118 @@ def get_pending_impact(group_name, approved_summary, full_summary):
     return {"pending_count": pending_count, "impact": impact, "label": label, "short": short}
 
 
+def format_action_plan_text(moves):
+    """Return a clean paste-ready action plan string from accepted moves."""
+    active = [m for m in moves if m.get("status") == "Active"]
+    if not active:
+        return ""
+    lines = [
+        "EZ Brackets — Action Plan",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Total moves: {len(active)}",
+        "",
+    ]
+    for i, m in enumerate(active, 1):
+        lines.append(f"{i}. Move {m['athlete_name']}")
+        lines.append(f"   FROM: {m['original_division']}")
+        lines.append(f"   TO:   {m['new_division']}")
+        lines.append(f"   Score: {m['score']}")
+        if m.get("academy_warning"):
+            lines.append(f"   ⚠️  {m['academy_warning']}")
+        if m.get("director_notes"):
+            lines.append(f"   Note: {m['director_notes']}")
+        lines.append("")
+    lines.append("Apply each move in Smoothcomp before publishing brackets.")
+    return "\n".join(lines)
+
+
+def build_safety_bullets(rec_row):
+    """Return a list of ✅/⚠️ bullet strings for a recommendation row."""
+    bullets = []
+
+    def _safe_float(val):
+        try:
+            return float(val) if val != "" else None
+        except (TypeError, ValueError):
+            return None
+
+    def _safe_int(val):
+        try:
+            return int(val) if val != "" else None
+        except (TypeError, ValueError):
+            return None
+
+    wd = _safe_float(rec_row.get("Weight Difference", ""))
+    sd = _safe_int(rec_row.get("Skill Difference", ""))
+    ad = _safe_int(rec_row.get("Age Difference", ""))
+    aw = str(rec_row.get("Academy Warning", "")).strip()
+
+    if wd is None:
+        bullets.append("⚠️ Unknown weight difference")
+    elif wd == 0:
+        bullets.append("✅ Same weight class")
+    elif wd <= 10:
+        bullets.append("⚠️ 1 weight class apart")
+    elif wd <= 20:
+        bullets.append("⚠️ 2 weight classes apart")
+    else:
+        bullets.append(f"⛔ {wd:.0f} lbs gap — exceeds limit")
+
+    if sd is None:
+        bullets.append("⚠️ Unknown skill level")
+    elif sd == 0:
+        bullets.append("✅ Same skill/belt level")
+    elif sd == 1:
+        bullets.append("⚠️ 1 skill level apart")
+    else:
+        bullets.append(f"⛔ {sd} skill levels — exceeds limit")
+
+    if ad is None:
+        bullets.append("⚠️ Unknown age group")
+    elif ad == 0:
+        bullets.append("✅ Same age group")
+    elif ad == 1:
+        bullets.append("⚠️ 1 age group apart")
+    else:
+        bullets.append(f"⛔ {ad} age groups — exceeds limit")
+
+    if aw:
+        bullets.append("⚠️ Same-academy bracket")
+    else:
+        bullets.append("✅ Mixed academy result")
+
+    return bullets
+
+
+def session_to_json(moves, guided_skipped, preset, view_mode):
+    """Serialize session state to a JSON-safe dict."""
+    return {
+        "ez_brackets_version": "1.0",
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "moves": moves,
+        "guided_skipped": list(guided_skipped) if guided_skipped else [],
+        "last_preset": preset,
+        "view_mode": view_mode,
+    }
+
+
+def restore_session_from_json(data):
+    """Validate and unpack a session dict. Returns (ok: bool, result_or_error)."""
+    if not isinstance(data, dict):
+        return False, "File is not a valid EZ Brackets session."
+    if data.get("ez_brackets_version") != "1.0":
+        return False, "Unrecognized session file version."
+    moves = data.get("moves", [])
+    if not isinstance(moves, list):
+        return False, "Session file is corrupted (moves field invalid)."
+    required = {"athlete_name", "original_division", "new_division",
+                "score", "academy_warning", "timestamp", "director_notes", "status"}
+    for m in moves:
+        if not isinstance(m, dict) or not required.issubset(m.keys()):
+            return False, "Session file contains invalid move records."
+    return True, data
+
+
 def check_move_back_alerts(moves, current_summary):
     alerts = []
     for move in moves:
@@ -1228,8 +1341,48 @@ if data_ready:
         st.session_state["guided_skipped"] = set()
     if "has_data" not in st.session_state:
         st.session_state["has_data"] = False
+    if "restore_key_counter" not in st.session_state:
+        st.session_state["restore_key_counter"] = 0
 
     with st.sidebar:
+        st.subheader("Session")
+        _active_for_save = [m for m in st.session_state.get("moves", []) if m["status"] == "Active"]
+        if _active_for_save:
+            _sj = session_to_json(
+                st.session_state.get("moves", []),
+                st.session_state.get("guided_skipped", set()),
+                st.session_state.get("last_preset", ""),
+                st.session_state.get("view_mode_radio", "🃏 Guided Mode"),
+            )
+            st.download_button(
+                "💾 Save Session",
+                data=json.dumps(_sj, indent=2).encode("utf-8"),
+                file_name=f"ez_brackets_session_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                mime="application/json",
+                key="sidebar_save_session",
+                help="Save your accepted moves and notes. Upload the file tomorrow to restore your work.",
+            )
+        _restore_file = st.file_uploader(
+            "Restore session (.json)",
+            type=["json"],
+            key=f"restore_session_{st.session_state['restore_key_counter']}",
+            help="Upload a previously saved EZ Brackets session file.",
+        )
+        if _restore_file is not None:
+            try:
+                _rdata = json.load(_restore_file)
+                _ok, _result = restore_session_from_json(_rdata)
+                if _ok:
+                    st.session_state["moves"] = _result["moves"]
+                    st.session_state["guided_skipped"] = set(_result.get("guided_skipped", []))
+                    st.session_state["restore_key_counter"] += 1
+                    st.success(f"Session restored — {len(_result['moves'])} moves loaded.")
+                    st.rerun()
+                else:
+                    st.error(_result)
+            except (json.JSONDecodeError, Exception) as _e:
+                st.error(f"Could not read session file: {_e}")
+        st.divider()
         st.header("Settings")
         only_approved = st.checkbox("Only analyze approved athletes", value=True)
         min_target_size = st.selectbox(
@@ -1373,6 +1526,31 @@ if data_ready:
         st.markdown(f'<div class="ez-health-number" style="color:{_c}">{_may_resolve_count}</div><div class="ez-health-label">May Self-Resolve</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # ── Next Step Banner ──────────────────────────────────────────────────────
+    if _remaining == 0 and _total_problems > 0 and _active_moves_count > 0:
+        _plan_text = format_action_plan_text(st.session_state.get("moves", []))
+        st.markdown('<div class="success-card">', unsafe_allow_html=True)
+        st.subheader("✅ Bracket Review Complete")
+        st.markdown(
+            "Download your Action Plan and apply these moves in Smoothcomp "
+            "**before publishing brackets**."
+        )
+        _nb1, _nb2 = st.columns(2)
+        with _nb1:
+            if _plan_text:
+                st.download_button(
+                    "📥 Download Action Plan (.txt)",
+                    data=_plan_text.encode("utf-8"),
+                    file_name=f"ez_brackets_plan_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                    mime="text/plain",
+                    key="next_step_download_txt",
+                )
+        with _nb2:
+            st.caption("Or copy the text below and paste into any messaging app:")
+        if _plan_text:
+            st.code(_plan_text, language="")
+        st.markdown("</div>", unsafe_allow_html=True)
+
     # ── View Mode Toggle ──────────────────────────────────────────────────────
     _view_mode = st.radio(
         "View:",
@@ -1459,10 +1637,8 @@ if data_ready:
 
                     if _has_rec and str(_best.get("Safety Flag", "")).strip() == "":
                         st.markdown(f"**Move to:** {_best['Suggested Division']}")
-                        _why_short = str(_best.get("Why", ""))[:120]
-                        st.caption(_why_short)
-                        if str(_best.get("Academy Warning", "")).strip():
-                            st.caption(f"⚠️ Academy: {_best['Academy Warning']}")
+                        _bullets = build_safety_bullets(_best)
+                        st.caption("  ·  ".join(_bullets))
 
                         with st.expander("See other options"):
                             _all_recs = recommendations[recommendations["Current Division"] == _grp].sort_values("Rank")
@@ -1795,6 +1971,26 @@ if data_ready:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
+            _export_plan_text = format_action_plan_text(st.session_state.get("moves", []))
+            if _export_plan_text:
+                st.divider()
+                st.markdown("**Copy Action Plan**")
+                st.caption(
+                    "Copy this text and paste it into email, WhatsApp, Discord, or any messaging app. "
+                    "Click the copy icon in the top-right corner of the box."
+                )
+                st.download_button(
+                    "📥 Download Action Plan (.txt)",
+                    data=_export_plan_text.encode("utf-8"),
+                    file_name=f"ez_brackets_plan_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                    mime="text/plain",
+                    key="export_tab_download_txt",
+                )
+                st.code(_export_plan_text, language="")
+            else:
+                st.divider()
+                st.caption("Accept moves in Guided Mode to generate a Copy Action Plan here.")
+
         st.markdown(
             '<div class="small-muted">Color Key: Green = Excellent / Good | Yellow = Review | Red = Last Resort, Academy Warning, or Do Not Match | Gray = No Strong Match</div>',
             unsafe_allow_html=True,
@@ -1880,7 +2076,6 @@ if data_ready:
             if st.button("Save Notes", key="save_notes_btn"):
                 _note_idx = _note_labels.index(_selected_note)
                 st.session_state["moves"][_note_idx]["director_notes"] = _new_note
-                st.session_state["notes_text_input"] = ""
                 st.rerun()
 
         _active_moves_for_revert = [
