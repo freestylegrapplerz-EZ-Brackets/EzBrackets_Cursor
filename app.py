@@ -235,6 +235,55 @@ st.markdown(
         background-color: rgba(34,197,94,0.18) !important;
         border-bottom: 3px solid #22c55e !important;
     }
+
+    .ez-compact-header {
+        padding: 10px 20px;
+        border-radius: 14px;
+        background: rgba(15,23,42,0.88);
+        border: 1px solid rgba(255,255,255,0.12);
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 14px;
+    }
+    .ez-compact-logo {
+        font-size: 18px;
+        font-weight: 900;
+        color: #22c55e;
+        margin-right: 2px;
+    }
+    .ez-compact-pill {
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.07);
+        color: #94a3b8;
+        font-size: 13px;
+        white-space: nowrap;
+    }
+    .ez-compact-pill b { color: #f8fafc; }
+
+    .ez-health-panel {
+        padding: 18px 22px;
+        border-radius: 20px;
+        background: rgba(15,23,42,0.78);
+        border: 1px solid rgba(255,255,255,0.10);
+        margin-bottom: 16px;
+    }
+    .ez-health-number {
+        font-size: 36px;
+        font-weight: 900;
+        line-height: 1;
+    }
+    .ez-health-label {
+        color: #94a3b8;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .07em;
+        margin-top: 4px;
+    }
+    .ez-card-accept { margin-top: 8px; }
 </style>
 ''',
     unsafe_allow_html=True,
@@ -975,6 +1024,35 @@ def sample_csv_bytes():
         return f.read()
 
 
+def get_pending_impact(group_name, approved_summary, full_summary):
+    """Return pending-athlete impact info for a single-athlete division."""
+    full_match = full_summary[full_summary["group"] == group_name]
+    appr_match = approved_summary[approved_summary["group"] == group_name]
+    if full_match.empty:
+        return {"pending_count": 0, "impact": "none", "label": "—", "short": "—"}
+    full_count = int(full_match.iloc[0]["athletes"])
+    appr_count = int(appr_match.iloc[0]["athletes"]) if not appr_match.empty else 0
+    pending_count = full_count - appr_count
+    if pending_count <= 0:
+        return {"pending_count": 0, "impact": "none", "label": "—", "short": "—"}
+    academies_str = str(full_match.iloc[0]["academies"])
+    unique_acad = len([a for a in academies_str.split(",") if a.strip()])
+    combined = full_count
+    if combined >= 2 and unique_acad >= 2:
+        impact = "resolves"
+        label = f"✅ {pending_count} pending — may self-resolve (mixed academy)"
+        short = f"✅ {pending_count} pending"
+    elif combined >= 2 and unique_acad < 2:
+        impact = "conflict"
+        label = f"⚠️ {pending_count} pending (same academy — conflict remains)"
+        short = f"⚠️ {pending_count} pending (conflict)"
+    else:
+        impact = "insufficient"
+        label = f"⏳ {pending_count} pending (not enough to resolve)"
+        short = f"⏳ {pending_count} pending"
+    return {"pending_count": pending_count, "impact": impact, "label": label, "short": short}
+
+
 def check_move_back_alerts(moves, current_summary):
     alerts = []
     for move in moves:
@@ -1008,8 +1086,9 @@ def metric_card(label, value, help_text):
     )
 
 
-st.markdown(
-    '''
+if not st.session_state.get("has_data", False):
+    st.markdown(
+        '''
     <div class="ez-hero">
         <div class="ez-logo-row">
             <div class="ez-logo">EZ<span class="ez-logo-tm">TM</span></div>
@@ -1027,16 +1106,26 @@ st.markdown(
         </div>
     </div>
     ''',
-    unsafe_allow_html=True,
-)
-
-
-st.download_button(
-    "Download sample CSV template",
-    data=sample_csv_bytes(),
-    file_name="ez_brackets_sample_template.csv",
-    mime="text/csv",
-)
+        unsafe_allow_html=True,
+    )
+    st.download_button(
+        "Download sample CSV template",
+        data=sample_csv_bytes(),
+        file_name="ez_brackets_sample_template.csv",
+        mime="text/csv",
+    )
+else:
+    _cs = st.session_state
+    st.markdown(
+        f'''<div class="ez-compact-header">
+            <span class="ez-compact-logo">🥋 EZ Brackets</span>
+            <span class="ez-compact-pill"><b>{_cs.get("last_athlete_count", "—")}</b> athletes</span>
+            <span class="ez-compact-pill"><b>{_cs.get("last_singles_count", "—")}</b> singles</span>
+            <span class="ez-compact-pill"><b>{_cs.get("last_conflicts_count", "—")}</b> conflicts</span>
+            <span class="ez-compact-pill">Preset: <b>{_cs.get("last_preset", "—")}</b></span>
+        </div>''',
+        unsafe_allow_html=True,
+    )
 
 import_mode = st.radio(
     "Choose how you want to load bracket data",
@@ -1135,6 +1224,10 @@ if data_ready:
         st.session_state["moves"] = []
     if "move_back_alerts" not in st.session_state:
         st.session_state["move_back_alerts"] = []
+    if "guided_skipped" not in st.session_state:
+        st.session_state["guided_skipped"] = set()
+    if "has_data" not in st.session_state:
+        st.session_state["has_data"] = False
 
     with st.sidebar:
         st.header("Settings")
@@ -1177,6 +1270,7 @@ if data_ready:
             working_df = approved_df
 
     summary = group_summary(working_df)
+    full_summary = group_summary(df)
 
     if hash_changed:
         if st.session_state.get("moves"):
@@ -1206,6 +1300,21 @@ if data_ready:
     )
 
     academy_conflict_groups = summary[(summary["athletes"] >= 2) & (summary["academy_count"] == 1)].copy()
+
+    # Cache stats for compact header (read next render before data_ready is set)
+    st.session_state["has_data"] = True
+    st.session_state["last_athlete_count"] = len(working_df)
+    st.session_state["last_singles_count"] = len(singles)
+    st.session_state["last_conflicts_count"] = len(academy_conflict_groups)
+    st.session_state["last_preset"] = rule_preset
+
+    # Pending impact for every single division
+    _pending_impacts = {
+        row["group"]: get_pending_impact(row["group"], summary, full_summary)
+        for _, row in singles.iterrows()
+    }
+    _may_resolve_count = sum(1 for v in _pending_impacts.values() if v["impact"] == "resolves")
+
     rank1_recommendations = recommendations[recommendations["Rank"] == 1].copy() if not recommendations.empty else pd.DataFrame()
     rank1_conflicts = academy_conflict_recommendations[
         academy_conflict_recommendations["Rank"] == 1
@@ -1231,6 +1340,267 @@ if data_ready:
     with c4:
         metric_card("Academy Conflicts", len(academy_conflict_groups), "2+ athlete divisions from one academy")
 
+    # ── Event Health Dashboard ────────────────────────────────────────────────
+    _active_moves_count = sum(1 for m in st.session_state.get("moves", []) if m["status"] == "Active")
+    _total_problems = len(singles) + len(academy_conflict_groups)
+    _remaining = _total_problems - _active_moves_count
+    _progress_val = _active_moves_count / _total_problems if _total_problems > 0 else 0.0
+
+    if _remaining == 0 and _total_problems > 0:
+        _event_status = "✅ Event looks clean"
+        _status_color = "#22c55e"
+    elif _remaining <= max(1, _total_problems // 4):
+        _event_status = "🟡 Almost ready — review remaining items"
+        _status_color = "#fbbf24"
+    else:
+        _event_status = "🔴 Action required"
+        _status_color = "#ef4444"
+
+    st.markdown('<div class="ez-health-panel">', unsafe_allow_html=True)
+    st.subheader("Event Health")
+    st.progress(_progress_val, text=f"{_active_moves_count} of {_total_problems} problems resolved — {_event_status}")
+    _h1, _h2, _h3, _h4 = st.columns(4)
+    with _h1:
+        _c = "#ef4444" if len(singles) > 0 else "#22c55e"
+        st.markdown(f'<div class="ez-health-number" style="color:{_c}">{len(singles)}</div><div class="ez-health-label">Singles</div>', unsafe_allow_html=True)
+    with _h2:
+        _c = "#f97316" if len(academy_conflict_groups) > 0 else "#22c55e"
+        st.markdown(f'<div class="ez-health-number" style="color:{_c}">{len(academy_conflict_groups)}</div><div class="ez-health-label">Conflicts</div>', unsafe_allow_html=True)
+    with _h3:
+        st.markdown(f'<div class="ez-health-number" style="color:#22c55e">{_active_moves_count}</div><div class="ez-health-label">Accepted Moves</div>', unsafe_allow_html=True)
+    with _h4:
+        _c = "#ef4444" if _may_resolve_count > 0 else "#94a3b8"
+        st.markdown(f'<div class="ez-health-number" style="color:{_c}">{_may_resolve_count}</div><div class="ez-health-label">May Self-Resolve</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── View Mode Toggle ──────────────────────────────────────────────────────
+    _view_mode = st.radio(
+        "View:",
+        ["🃏 Guided Mode", "📋 Table Mode"],
+        horizontal=True,
+        key="view_mode_radio",
+    )
+    _guided_mode = _view_mode == "🃏 Guided Mode"
+
+    # ── Guided Mode ───────────────────────────────────────────────────────────
+    if _guided_mode:
+        _active_orig_divs = {
+            m["original_division"] for m in st.session_state["moves"] if m["status"] == "Active"
+        }
+        _skipped = st.session_state.get("guided_skipped", set())
+
+        # Build ordered card list: no-pending first, then pending-may-resolve, then no-safe-match
+        _all_singles = singles.copy()
+        _unresolved = _all_singles[~_all_singles["group"].isin(_active_orig_divs)]
+        _active_not_skipped = _unresolved[~_unresolved["group"].isin(_skipped)]
+        _active_skipped = _unresolved[_unresolved["group"].isin(_skipped)]
+
+        def _single_priority(row):
+            pi = _pending_impacts.get(row["group"], {})
+            grp = row["group"]
+            has_rec = not recommendations.empty and (recommendations["Current Division"] == grp).any()
+            if pi.get("impact") == "resolves":
+                return 2
+            if not has_rec:
+                return 3
+            return 1
+
+        if not _active_not_skipped.empty:
+            _active_not_skipped = _active_not_skipped.copy()
+            _active_not_skipped["_pri"] = _active_not_skipped.apply(_single_priority, axis=1)
+            _active_not_skipped = _active_not_skipped.sort_values("_pri").drop(columns=["_pri"])
+
+        _display_singles = pd.concat([_active_not_skipped, _active_skipped], ignore_index=True)
+
+        # ── Singles cards ──────────────────────────────────────────────────
+        if _display_singles.empty and len(academy_conflict_groups) == 0:
+            st.markdown('<div class="success-card">All problems resolved for this session.</div>', unsafe_allow_html=True)
+        else:
+            if not _display_singles.empty:
+                st.subheader(f"Singles — {len(_unresolved)} remaining")
+            for _ci, (_, _sr) in enumerate(_display_singles.iterrows()):
+                _grp = _sr["group"]
+                _name = _sr["names"]
+                _acad = _sr["academies"]
+                _pi = _pending_impacts.get(_grp, {"pending_count": 0, "impact": "none", "label": "—"})
+                _is_skipped = _grp in _skipped
+
+                _rec_rows = recommendations[
+                    (recommendations["Current Division"] == _grp) & (recommendations["Rank"] == 1)
+                ] if not recommendations.empty else pd.DataFrame()
+                _has_rec = not _rec_rows.empty
+                _best = _rec_rows.iloc[0] if _has_rec else None
+
+                if _pi["impact"] == "resolves":
+                    _card_icon = "🟡"
+                elif not _has_rec:
+                    _card_icon = "⛔"
+                elif _is_skipped:
+                    _card_icon = "⏭️"
+                else:
+                    _card_icon = "🔴"
+
+                _card_key = f"sc_{_ci}"
+                with st.container(border=True):
+                    _ca, _cb = st.columns([3, 1])
+                    with _ca:
+                        st.markdown(f"**{_card_icon} {_name}** · {_acad}")
+                        st.caption(_grp)
+                        if _pi["pending_count"] > 0:
+                            st.caption(_pi["label"])
+                        else:
+                            st.caption("— No pending athletes in this division")
+                    with _cb:
+                        if _has_rec:
+                            _q = str(_best["Quality"])
+                            _q_color = "#22c55e" if "excellent" in _q.lower() else ("#fbbf24" if "good" in _q.lower() or "review" in _q.lower() else "#94a3b8")
+                            st.markdown(f'<div style="text-align:right;font-size:13px;color:{_q_color};font-weight:700">{_q}</div>', unsafe_allow_html=True)
+                            st.markdown(f'<div style="text-align:right;font-size:20px;font-weight:900;color:#f8fafc">{int(_best["Match Score"])}</div>', unsafe_allow_html=True)
+
+                    if _has_rec and str(_best.get("Safety Flag", "")).strip() == "":
+                        st.markdown(f"**Move to:** {_best['Suggested Division']}")
+                        _why_short = str(_best.get("Why", ""))[:120]
+                        st.caption(_why_short)
+                        if str(_best.get("Academy Warning", "")).strip():
+                            st.caption(f"⚠️ Academy: {_best['Academy Warning']}")
+
+                        with st.expander("See other options"):
+                            _all_recs = recommendations[recommendations["Current Division"] == _grp].sort_values("Rank")
+                            for _, _rr in _all_recs.iterrows():
+                                _flag = str(_rr.get("Safety Flag", "")).strip()
+                                _lbl = "⛔ Do Not Match" if _flag else f"Rank {int(_rr['Rank'])} · Score {int(_rr['Match Score'])} · {_rr['Quality']}"
+                                st.markdown(f"**{_lbl}** → {_rr['Suggested Division']}")
+                                st.caption(str(_rr.get("Why", ""))[:100])
+                                if not _flag:
+                                    if st.button(f"Accept rank {int(_rr['Rank'])}", key=f"{_card_key}_alt_{int(_rr['Rank'])}"):
+                                        st.session_state["moves"].append({
+                                            "athlete_name": _name,
+                                            "original_division": _grp,
+                                            "new_division": str(_rr["Suggested Division"]),
+                                            "score": int(_rr["Match Score"]),
+                                            "academy_warning": str(_rr.get("Academy Warning", "")),
+                                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                            "director_notes": "",
+                                            "status": "Active",
+                                        })
+                                        st.session_state["guided_skipped"].discard(_grp)
+                                        st.rerun()
+                    elif _has_rec and str(_best.get("Safety Flag", "")).strip():
+                        st.markdown("**⛔ No safe match available** — all options exceed safety limits.")
+                        st.caption("Adjust safety sliders in the sidebar or check Table Mode for details.")
+                    else:
+                        st.markdown("**⛔ No recommendations generated** for this division.")
+
+                    _btn_cols = st.columns([2, 1, 1])
+                    with _btn_cols[1]:
+                        _skip_label = "Un-skip" if _is_skipped else "Skip ›"
+                        if st.button(_skip_label, key=f"{_card_key}_skip"):
+                            if _is_skipped:
+                                st.session_state["guided_skipped"].discard(_grp)
+                            else:
+                                st.session_state["guided_skipped"].add(_grp)
+                            st.rerun()
+                    with _btn_cols[2]:
+                        if _has_rec and str(_best.get("Safety Flag", "")).strip() == "":
+                            _accept_label = "Accept Anyway ✓" if _pi["impact"] == "resolves" else "✓ Accept"
+                            if st.button(_accept_label, key=f"{_card_key}_accept", type="primary"):
+                                st.session_state["moves"].append({
+                                    "athlete_name": _name,
+                                    "original_division": _grp,
+                                    "new_division": str(_best["Suggested Division"]),
+                                    "score": int(_best["Match Score"]),
+                                    "academy_warning": str(_best.get("Academy Warning", "")),
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                    "director_notes": "",
+                                    "status": "Active",
+                                })
+                                st.session_state["guided_skipped"].discard(_grp)
+                                st.rerun()
+
+        # ── Academy Conflict cards ─────────────────────────────────────────
+        _active_conflict_divs = {
+            m["original_division"] for m in st.session_state["moves"] if m["status"] == "Active"
+        }
+        _unresolved_conflicts = academy_conflict_groups[
+            ~academy_conflict_groups["group"].isin(_active_conflict_divs)
+        ]
+        if not _unresolved_conflicts.empty:
+            st.subheader(f"Academy Conflicts — {len(_unresolved_conflicts)} remaining")
+            for _cci, (_, _cr) in enumerate(_unresolved_conflicts.iterrows()):
+                _cgrp = _cr["group"]
+                _cnames = _cr["names"]
+                _cacad = _cr["academies"]
+                _crec_rows = academy_conflict_recommendations[
+                    (academy_conflict_recommendations["Problem Division"] == _cgrp) &
+                    (academy_conflict_recommendations["Rank"] == 1)
+                ] if not academy_conflict_recommendations.empty else pd.DataFrame()
+                _chas_rec = not _crec_rows.empty
+                _cbest = _crec_rows.iloc[0] if _chas_rec else None
+                _ckey = f"cc_{_cci}"
+                with st.container(border=True):
+                    _cca, _ccb = st.columns([3, 1])
+                    with _cca:
+                        st.markdown(f"**🟠 {_cnames}**")
+                        st.caption(f"{_cgrp} · Academy: {_cacad}")
+                    with _ccb:
+                        if _chas_rec:
+                            _cq = str(_cbest["Quality"])
+                            _cq_color = "#22c55e" if "excellent" in _cq.lower() else "#fbbf24"
+                            st.markdown(f'<div style="text-align:right;font-size:13px;color:{_cq_color};font-weight:700">{_cq}</div>', unsafe_allow_html=True)
+                            st.markdown(f'<div style="text-align:right;font-size:20px;font-weight:900;color:#f8fafc">{int(_cbest["Match Score"])}</div>', unsafe_allow_html=True)
+                    if _chas_rec and str(_cbest.get("Safety Flag", "")).strip() == "":
+                        st.markdown(f"**Merge into:** {_cbest['Suggested Division']}")
+                        st.caption(str(_cbest.get("Why", ""))[:120])
+                        if str(_cbest.get("Academy Mix After Merge", "")).strip():
+                            st.caption(f"Result: {_cbest['Academy Mix After Merge']}")
+                        _cbtn_cols = st.columns([3, 1])
+                        with _cbtn_cols[1]:
+                            if st.button("✓ Accept Merge", key=f"{_ckey}_accept", type="primary"):
+                                st.session_state["moves"].append({
+                                    "athlete_name": _cnames,
+                                    "original_division": _cgrp,
+                                    "new_division": str(_cbest["Suggested Division"]),
+                                    "score": int(_cbest["Match Score"]),
+                                    "academy_warning": str(_cbest.get("Academy Mix After Merge", "")),
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                    "director_notes": "",
+                                    "status": "Active",
+                                })
+                                st.rerun()
+                    else:
+                        st.markdown("**⛔ No safe merge available.**")
+
+        # ── Resolved section ───────────────────────────────────────────────
+        _resolved_moves = [m for m in st.session_state["moves"] if m["status"] == "Active"]
+        if _resolved_moves:
+            with st.expander(f"✅ Accepted this session — {len(_resolved_moves)} move(s)", expanded=False):
+                for _ri, _rm in enumerate(_resolved_moves):
+                    with st.container(border=True):
+                        _rcol1, _rcol2 = st.columns([4, 1])
+                        with _rcol1:
+                            st.markdown(f"**{_rm['athlete_name']}** → {_rm['new_division']}")
+                            st.caption(f"Score: {_rm['score']} · {_rm['timestamp']}")
+                            if _rm["director_notes"]:
+                                st.caption(f"📝 {_rm['director_notes']}")
+                        with _rcol2:
+                            _full_idx = next(
+                                (i for i, m in enumerate(st.session_state["moves"]) if m is _rm), None
+                            )
+                            if _full_idx is not None and st.button("↩ Revert", key=f"g_revert_{_ri}"):
+                                st.session_state["moves"][_full_idx]["status"] = "Reverted"
+                                st.rerun()
+                        _note_input = st.text_input(
+                            "Add note:", key=f"g_note_{_ri}",
+                            value=_rm["director_notes"],
+                            placeholder="Director notes…",
+                        )
+                        if _note_input != _rm["director_notes"]:
+                            if _full_idx is not None:
+                                st.session_state["moves"][_full_idx]["director_notes"] = _note_input
+
+        st.divider()
+
+    # ── Table Mode sections (always rendered; primary view when not guided) ──
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Event Summary")
     summary_cols = st.columns(4)
@@ -1251,10 +1621,11 @@ if data_ready:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Single-Athlete Divisions")
     if not singles.empty:
-        st.dataframe(
-            singles[["group", "athletes", "entry", "skill", "age", "weight", "names", "academies"]],
-            use_container_width=True,
+        _singles_display = singles[["group", "athletes", "entry", "skill", "age", "weight", "names", "academies"]].copy()
+        _singles_display["Pending Impact"] = _singles_display["group"].map(
+            lambda g: _pending_impacts.get(g, {}).get("short", "—")
         )
+        st.dataframe(_singles_display, use_container_width=True)
     else:
         st.markdown('<div class="success-card">No single-athlete groups found.</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
