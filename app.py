@@ -1586,11 +1586,11 @@ if data_ready:
                             _full_idx = next(
                                 (i for i, m in enumerate(st.session_state["moves"]) if m is _rm), None
                             )
-                            if _full_idx is not None and st.button("↩ Revert", key=f"g_revert_{_ri}"):
+                            if _full_idx is not None and st.button("↩ Revert", key=f"g_revert_{_full_idx}"):
                                 st.session_state["moves"][_full_idx]["status"] = "Reverted"
                                 st.rerun()
                         _note_input = st.text_input(
-                            "Add note:", key=f"g_note_{_ri}",
+                            "Add note:", key=f"g_note_{_full_idx}",
                             value=_rm["director_notes"],
                             placeholder="Director notes…",
                         )
