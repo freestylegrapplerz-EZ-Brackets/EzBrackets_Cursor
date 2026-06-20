@@ -438,6 +438,7 @@ DEFAULT_SCORING_SETTINGS = {
     "major_age_penalty": 40,
     "same_academy_penalty": 35,
     "mixed_academy_bonus": 4,
+    "adjacent_class_penalty": 6,
     "target_size_two_bonus": 2,
     "target_size_three_plus_bonus": 5,
     "max_safe_weight_diff": 20,
@@ -546,24 +547,29 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
         score -= penalty
         reasons.append("unknown weight difference")
         breakdown.append(f"Unknown weight: -{penalty}")
-    elif weight_diff <= 10:
-        reasons.append(f"good weight match ({weight_diff:.1f} lbs)")
+    elif weight_diff == 0:
+        reasons.append("same weight class")
         breakdown.append("Weight: 0")
+    elif weight_diff <= 10:
+        penalty = settings["adjacent_class_penalty"]
+        score -= penalty
+        reasons.append("1 weight class apart")
+        breakdown.append(f"1 weight class apart: -{penalty}")
     elif weight_diff <= 20:
         penalty = settings["moderate_weight_penalty"]
         score -= penalty
-        reasons.append(f"moderate weight jump ({weight_diff:.1f} lbs)")
-        breakdown.append(f"Moderate weight jump: -{penalty}")
+        reasons.append("2 weight classes apart")
+        breakdown.append(f"2 weight classes apart: -{penalty}")
     elif weight_diff <= 30:
         penalty = settings["large_weight_penalty"]
         score -= penalty
-        reasons.append(f"large weight jump ({weight_diff:.1f} lbs)")
-        breakdown.append(f"Large weight jump: -{penalty}")
+        reasons.append("3 weight classes apart")
+        breakdown.append(f"3 weight classes apart: -{penalty}")
     else:
         penalty = settings["very_large_weight_penalty"]
         score -= penalty
-        reasons.append(f"very large weight jump ({weight_diff:.1f} lbs)")
-        breakdown.append(f"Very large weight jump: -{penalty}")
+        reasons.append("4+ weight classes apart")
+        breakdown.append(f"4+ weight classes apart: -{penalty}")
 
     if weight_diff != 999 and weight_diff > settings["max_safe_weight_diff"]:
         safety_flags.append(f"Weight gap over {settings['max_safe_weight_diff']} lbs")
@@ -838,7 +844,7 @@ def style_quality_rows(df):
         quality = str(row.get("Quality", "")).lower()
         safety = str(row.get("Safety Flag", "")).lower()
 
-        if safety:
+        if safety or "do not match" in quality:
             color = "#fca5a5"
         elif "all same academy" in warning:
             color = "#fecaca"
@@ -1310,10 +1316,22 @@ if data_ready:
 
         best_matches = filtered_recommendations[filtered_recommendations["Rank"] == 1].copy()
 
+        _basic_view = st.checkbox(
+            "Simplified view",
+            value=False,
+            key="basic_view_checkbox",
+            help="Show only Athlete, Current Division, Suggested Division, Why, and Quality.",
+        )
+        _BASIC_COLS = ["Athlete", "Current Division", "Suggested Division", "Why", "Quality"]
+
         tab1, tab2, tab3 = st.tabs(["Best Match Only", "All Suggestions", "Export"])
 
         with tab1:
-            st.dataframe(style_quality_rows(best_matches), use_container_width=True)
+            _disp_best = (
+                best_matches[[c for c in _BASIC_COLS if c in best_matches.columns]]
+                if _basic_view else best_matches
+            )
+            st.dataframe(style_quality_rows(_disp_best), use_container_width=True)
 
             if not best_matches.empty:
                 st.divider()
@@ -1349,7 +1367,11 @@ if data_ready:
                     st.rerun()
 
         with tab2:
-            st.dataframe(style_quality_rows(filtered_recommendations), use_container_width=True)
+            _disp_all = (
+                filtered_recommendations[[c for c in _BASIC_COLS if c in filtered_recommendations.columns]]
+                if _basic_view else filtered_recommendations
+            )
+            st.dataframe(style_quality_rows(_disp_all), use_container_width=True)
 
         with tab3:
             st.markdown("### Director Report")
