@@ -2076,7 +2076,6 @@ if data_ready:
             if st.button("Save Notes", key="save_notes_btn"):
                 _note_idx = _note_labels.index(_selected_note)
                 st.session_state["moves"][_note_idx]["director_notes"] = _new_note
-                st.session_state["notes_text_input"] = ""
                 st.rerun()
 
         _active_moves_for_revert = [
