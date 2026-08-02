@@ -9,7 +9,7 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - DEV v2
+# EZ BRACKETS - DEV v2.1
 # =========================
 
 st.set_page_config(
@@ -26,8 +26,18 @@ st.markdown(
         color: #f8fafc;
     }
 
-    h1, h2, h3, h4, h5, h6, p, label, span {
+    h1, h2, h3, h4, h5, h6, p, label {
         color: #f8fafc !important;
+    }
+
+    /* Keep custom HTML spans light, but do not force button/widget text white */
+    .ez-hero span,
+    .ez-badge,
+    .ez-compact-header span,
+    .metric-card span,
+    .section-card > span,
+    .ez-health-panel span {
+        color: inherit;
     }
 
     .ez-hero {
@@ -216,9 +226,55 @@ st.markdown(
         border: 1px solid rgba(255,255,255,0.12);
     }
 
+    /* Dark-theme friendly buttons — fix white boxes with invisible labels */
+    div[data-testid="stDownloadButton"] > button,
+    div[data-testid="stBaseButton-secondary"] > button,
+    .stButton > button[kind="secondary"],
     button[kind="secondary"] {
         border-radius: 12px !important;
-        border: 1px solid rgba(34,197,94,0.45) !important;
+        background-color: rgba(15, 23, 42, 0.95) !important;
+        border: 1px solid rgba(34, 197, 94, 0.55) !important;
+        color: #bbf7d0 !important;
+    }
+
+    div[data-testid="stDownloadButton"] > button *,
+    div[data-testid="stBaseButton-secondary"] > button *,
+    .stButton > button[kind="secondary"] *,
+    button[kind="secondary"] * {
+        color: #bbf7d0 !important;
+    }
+
+    div[data-testid="stDownloadButton"] > button:hover,
+    .stButton > button[kind="secondary"]:hover,
+    button[kind="secondary"]:hover {
+        background-color: rgba(34, 197, 94, 0.22) !important;
+        border-color: rgba(34, 197, 94, 0.85) !important;
+        color: #ecfdf5 !important;
+    }
+
+    div[data-testid="stDownloadButton"] > button:hover *,
+    .stButton > button[kind="secondary"]:hover *,
+    button[kind="secondary"]:hover * {
+        color: #ecfdf5 !important;
+    }
+
+    .stButton > button[kind="primary"],
+    button[kind="primary"] {
+        border-radius: 12px !important;
+        background-color: #16a34a !important;
+        border: 1px solid #22c55e !important;
+        color: #ffffff !important;
+    }
+
+    .stButton > button[kind="primary"] *,
+    button[kind="primary"] * {
+        color: #ffffff !important;
+    }
+
+    /* Radio / checkbox labels stay readable on dark background */
+    div[data-testid="stRadio"] label p,
+    div[data-testid="stCheckbox"] label p {
+        color: #f8fafc !important;
     }
 
     .stTabs [data-baseweb="tab-list"] {
@@ -302,11 +358,18 @@ AGE_ORDER_HINTS = [
     ("Mighty Mite", 1),
     ("Pee Wee", 2),
     ("Kindergarten", 3),
-    ("Youth", 4),
-    ("Pre Teen", 5),
-    ("Junior Teen", 6),
-    ("Teen", 7),
-    ("Juvenile", 8),
+    # Specific Youth bands must stay distinct — generic "Youth" is a fallback only.
+    ("Youth 6-7", 4),
+    ("Youth 8-9", 5),
+    ("Youth 10-11", 6),
+    ("Youth 12-13", 7),
+    ("Youth 14-15", 8),
+    ("Youth 16-17", 9),
+    ("Youth", 6),
+    ("Pre Teen", 10),
+    ("Junior Teen", 11),
+    ("Teen", 12),
+    ("Juvenile", 13),
     ("Adult", 20),
     ("Master 1", 21),
     ("Master 2", 22),
@@ -314,6 +377,11 @@ AGE_ORDER_HINTS = [
     ("Master 4", 24),
     ("Master 5", 25),
 ]
+
+GENDER_TOKENS = {
+    "male", "female", "m", "f", "men", "women",
+    "boy", "boys", "girl", "girls", "man", "woman",
+}
 
 
 def find_col(df, possible_names):
@@ -331,13 +399,32 @@ def find_col(df, possible_names):
 
 
 def parse_group(group):
-    parts = [p.strip() for p in str(group).split("/")]
-    return (
-        parts[0] if len(parts) > 0 else "",
-        parts[1] if len(parts) > 1 else "",
-        parts[2] if len(parts) > 2 else "",
-        parts[3] if len(parts) > 3 else "",
-    )
+    """Split a Smoothcomp-style group into entry/skill/age/weight.
+
+    Gender tokens (Male/Female/etc.) are removed so 5-part paths like
+    ``Gi / Blue / Male / Adult / 150 - 159 lbs`` still parse correctly.
+    """
+    parts = [p.strip() for p in str(group).split("/") if str(p).strip()]
+    parts = [p for p in parts if p.lower() not in GENDER_TOKENS]
+
+    entry = parts[0] if len(parts) > 0 else ""
+    skill = parts[1] if len(parts) > 1 else ""
+    age = parts[2] if len(parts) > 2 else ""
+    weight = parts[3] if len(parts) > 3 else ""
+
+    # If an extra segment remains, prefer the last weight-looking token.
+    if len(parts) > 4:
+        weight_idx = None
+        for i, p in enumerate(parts):
+            low = p.lower()
+            if "lb" in low or "kg" in low or re.search(r"\d+\s*-\s*\d+", p):
+                weight_idx = i
+        if weight_idx is not None and weight_idx >= 3:
+            weight = parts[weight_idx]
+            age = parts[weight_idx - 1] if weight_idx - 1 >= 2 else age
+            skill = parts[1] if len(parts) > 1 else skill
+
+    return entry, skill, age, weight
 
 
 def skill_value(skill):
@@ -349,10 +436,20 @@ def skill_value(skill):
 
 
 def age_value(age):
+    """Return a sortable age rank. Longer label matches win (Youth 8-9 > Youth)."""
     a = str(age)
-    for key, value in AGE_ORDER_HINTS:
-        if key.lower() in a.lower():
-            return value
+    a_low = a.lower()
+    matches = [(key, value) for key, value in AGE_ORDER_HINTS if key.lower() in a_low]
+    if matches:
+        matches.sort(key=lambda kv: len(kv[0]), reverse=True)
+        best_key, best_val = matches[0]
+        # Generic "Youth" with numbers but no explicit band → use age midpoints.
+        if best_key.lower() == "youth":
+            nums = [int(n) for n in re.findall(r"\d+", a)]
+            if nums:
+                mid = sum(nums) / len(nums)
+                return 3 + mid / 10.0  # Youth 8-9 → 3.85, Youth 10-11 → 4.05
+        return best_val
     nums = re.findall(r"\d+", a)
     return int(nums[0]) if nums else 999
 
@@ -367,6 +464,17 @@ def weight_mid(weight):
     if len(nums) == 1:
         return float(nums[0])
     return None
+
+
+def normalize_entry_type(entry):
+    """Normalize Gi / No-Gi spellings so Nogi/NOGI/No Gi all count as no-gi."""
+    raw = str(entry).strip().lower()
+    compact = re.sub(r"[\s_\-]+", "", raw)
+    if "nogi" in compact:
+        return "no-gi"
+    if compact == "gi" or re.match(r"^gi\b", raw):
+        return "gi"
+    return raw
 
 
 def normalize_dataframe(raw_df):
@@ -455,13 +563,7 @@ def group_summary(df):
 
 
 def same_entry(a, b):
-    a = str(a).lower()
-    b = str(b).lower()
-    a_nogi = "no-gi" in a or "no gi" in a
-    b_nogi = "no-gi" in b or "no gi" in b
-    if "gi" in a and "gi" in b:
-        return a_nogi == b_nogi
-    return a == b
+    return normalize_entry_type(a) == normalize_entry_type(b)
 
 
 def academy_mix_after_move(single_academy, target_academies):
@@ -1041,16 +1143,22 @@ def get_pending_impact(group_name, approved_summary, full_summary):
     combined = full_count
     if combined >= 2 and unique_acad >= 2:
         impact = "resolves"
-        label = f"✅ {pending_count} pending — may self-resolve (mixed academy)"
-        short = f"✅ {pending_count} pending"
+        label = (
+            f"✅ {pending_count} not-yet-approved athlete(s) in this division — "
+            "if they get approved, this single may get a partner automatically"
+        )
+        short = f"✅ {pending_count} waiting on approval (may fix itself)"
     elif combined >= 2 and unique_acad < 2:
         impact = "conflict"
-        label = f"⚠️ {pending_count} pending (same academy — conflict remains)"
-        short = f"⚠️ {pending_count} pending (conflict)"
+        label = (
+            f"⚠️ {pending_count} not-yet-approved athlete(s) here, but all from the same academy — "
+            "even after approval this may still be an academy conflict"
+        )
+        short = f"⚠️ {pending_count} waiting (same academy)"
     else:
         impact = "insufficient"
-        label = f"⏳ {pending_count} pending (not enough to resolve)"
-        short = f"⏳ {pending_count} pending"
+        label = f"⏳ {pending_count} not-yet-approved athlete(s) — not enough yet to fill this division"
+        short = f"⏳ {pending_count} waiting on approval"
     return {"pending_count": pending_count, "impact": impact, "label": label, "short": short}
 
 
@@ -1137,7 +1245,7 @@ def build_safety_bullets(rec_row):
     return bullets
 
 
-def session_to_json(moves, guided_skipped, preset, view_mode):
+def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash=""):
     """Serialize session state to a JSON-safe dict."""
     return {
         "ez_brackets_version": "1.0",
@@ -1146,6 +1254,7 @@ def session_to_json(moves, guided_skipped, preset, view_mode):
         "guided_skipped": list(guided_skipped) if guided_skipped else [],
         "last_preset": preset,
         "view_mode": view_mode,
+        "csv_hash": csv_hash or "",
     }
 
 
@@ -1164,6 +1273,26 @@ def restore_session_from_json(data):
         if not isinstance(m, dict) or not required.issubset(m.keys()):
             return False, "Session file contains invalid move records."
     return True, data
+
+
+def apply_restored_session(result):
+    """Apply validated session data into Streamlit session_state."""
+    st.session_state["moves"] = result["moves"]
+    st.session_state["guided_skipped"] = set(result.get("guided_skipped", []))
+    saved_preset = result.get("last_preset", "")
+    if saved_preset in SCORING_PRESETS:
+        st.session_state["rule_preset_select"] = saved_preset
+        st.session_state["last_preset"] = saved_preset
+    saved_view = result.get("view_mode", "")
+    if saved_view in ("🃏 Guided Mode", "📋 Table Mode"):
+        st.session_state["view_mode_radio"] = saved_view
+    st.session_state["restore_key_counter"] = st.session_state.get("restore_key_counter", 0) + 1
+    st.session_state["restore_csv_hash"] = result.get("csv_hash", "")
+    st.session_state["restore_notice"] = (
+        f"Session restored — {len(result['moves'])} move(s) loaded"
+        + (f" (saved {result.get('saved_at', '')})" if result.get("saved_at") else "")
+        + "."
+    )
 
 
 def check_move_back_alerts(moves, current_summary):
@@ -1208,24 +1337,31 @@ if not st.session_state.get("has_data", False):
             <div>
                 <div class="ez-title">EZ Brackets</div>
                 <div class="ez-subtitle">
-                    Smart tournament division matching for Smoothcomp and universal CSVs. Find singles, rank merge options,
-                    flag academy-only brackets, and export director-ready reports.
+                    Find athletes stuck alone in a division, suggest safer places to move them,
+                    and export a clear move list for Smoothcomp.
                 </div>
-                <span class="ez-badge">Single-athlete detection</span>
-                <span class="ez-badge">Universal CSV mapping</span>
-                <span class="ez-badge">Academy warnings</span>
-                <span class="ez-badge">Director reports</span>
+                <span class="ez-badge">Find alone athletes</span>
+                <span class="ez-badge">Suggest safe moves</span>
+                <span class="ez-badge">Flag academy-only brackets</span>
+                <span class="ez-badge">Export a move list</span>
             </div>
         </div>
     </div>
     ''',
         unsafe_allow_html=True,
     )
+    st.info(
+        "**How to use EZ Brackets (3 steps):**  \n"
+        "1. Load your registration file (or try sample data below)  \n"
+        "2. Review each alone athlete in Guided Mode — Accept or Skip  \n"
+        "3. Download your Action Plan and apply those moves in Smoothcomp"
+    )
     st.download_button(
-        "Download sample CSV template",
+        "📥 Download sample CSV template",
         data=sample_csv_bytes(),
         file_name="ez_brackets_sample_template.csv",
         mime="text/csv",
+        help="Optional starter CSV if you want to see the expected column layout.",
     )
 else:
     _cs = st.session_state
@@ -1233,17 +1369,27 @@ else:
         f'''<div class="ez-compact-header">
             <span class="ez-compact-logo">🥋 EZ Brackets</span>
             <span class="ez-compact-pill"><b>{_cs.get("last_athlete_count", "—")}</b> athletes</span>
-            <span class="ez-compact-pill"><b>{_cs.get("last_singles_count", "—")}</b> singles</span>
-            <span class="ez-compact-pill"><b>{_cs.get("last_conflicts_count", "—")}</b> conflicts</span>
+            <span class="ez-compact-pill"><b>{_cs.get("last_singles_count", "—")}</b> alone</span>
+            <span class="ez-compact-pill"><b>{_cs.get("last_conflicts_count", "—")}</b> academy issues</span>
             <span class="ez-compact-pill">Preset: <b>{_cs.get("last_preset", "—")}</b></span>
         </div>''',
         unsafe_allow_html=True,
     )
 
 import_mode = st.radio(
-    "Choose how you want to load bracket data",
-    ["Smoothcomp Auto-Detect", "Universal CSV Mapping", "Use Sample Smoothcomp Data", "Use Sample Universal Data"],
+    "Step 1 — Choose how you want to load bracket data",
+    [
+        "Smoothcomp Auto-Detect",
+        "Universal CSV Mapping",
+        "Use Sample Smoothcomp Data",
+        "Use Sample Universal Data",
+    ],
     horizontal=True,
+    help=(
+        "Smoothcomp Auto-Detect: upload a Smoothcomp registrations CSV. "
+        "Universal CSV Mapping: map columns from another system. "
+        "Sample options: try the app with demo athletes — no upload needed."
+    ),
 )
 
 uploaded = None
@@ -1346,6 +1492,7 @@ if data_ready:
 
     with st.sidebar:
         st.subheader("Session")
+        st.caption("Save your work before closing the browser. Restore it later to keep going.")
         _active_for_save = [m for m in st.session_state.get("moves", []) if m["status"] == "Active"]
         if _active_for_save:
             _sj = session_to_json(
@@ -1353,6 +1500,7 @@ if data_ready:
                 st.session_state.get("guided_skipped", set()),
                 st.session_state.get("last_preset", ""),
                 st.session_state.get("view_mode_radio", "🃏 Guided Mode"),
+                csv_hash=st.session_state.get("csv_hash", ""),
             )
             st.download_button(
                 "💾 Save Session",
@@ -1360,7 +1508,7 @@ if data_ready:
                 file_name=f"ez_brackets_session_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
                 mime="application/json",
                 key="sidebar_save_session",
-                help="Save your accepted moves and notes. Upload the file tomorrow to restore your work.",
+                help="Save accepted moves, notes, preset, and view mode. Upload this file later to restore.",
             )
         _restore_file = st.file_uploader(
             "Restore session (.json)",
@@ -1373,40 +1521,66 @@ if data_ready:
                 _rdata = json.load(_restore_file)
                 _ok, _result = restore_session_from_json(_rdata)
                 if _ok:
-                    st.session_state["moves"] = _result["moves"]
-                    st.session_state["guided_skipped"] = set(_result.get("guided_skipped", []))
-                    st.session_state["restore_key_counter"] += 1
-                    st.success(f"Session restored — {len(_result['moves'])} moves loaded.")
+                    apply_restored_session(_result)
                     st.rerun()
                 else:
                     st.error(_result)
             except (json.JSONDecodeError, Exception) as _e:
                 st.error(f"Could not read session file: {_e}")
+        if st.session_state.get("restore_notice"):
+            st.success(st.session_state.pop("restore_notice"))
+            _saved_hash = st.session_state.get("restore_csv_hash", "")
+            _current_hash = st.session_state.get("csv_hash", "")
+            if _saved_hash and _current_hash and _saved_hash != _current_hash:
+                st.warning(
+                    "This registration file looks different from the one used when the session was saved. "
+                    "Double-check that your accepted moves still make sense."
+                )
+            elif _saved_hash and not _current_hash:
+                st.info(
+                    "Moves restored. Load the same registration CSV you used before so the divisions match."
+                )
         st.divider()
         st.header("Settings")
         only_approved = st.checkbox("Only analyze approved athletes", value=True)
         min_target_size = st.selectbox(
-            "Suggest moving singles into groups with at least:",
+            "Suggest moving alone athletes into groups with at least:",
             [1, 2, 3],
             index=0,
         )
-        top_n = st.slider("Top suggestions per single", min_value=1, max_value=5, value=3)
+        top_n = st.slider("Top suggestions per alone athlete", min_value=1, max_value=5, value=3)
         allow_entry_crossover = st.checkbox("Show Gi/No-Gi crossover emergency options", value=False)
         st.divider()
         st.subheader("Rule Preset")
+        _preset_keys = list(SCORING_PRESETS.keys())
+        _default_preset_idx = 1 if len(_preset_keys) > 1 else 0
+        if "rule_preset_select" not in st.session_state:
+            st.session_state["rule_preset_select"] = _preset_keys[_default_preset_idx]
         rule_preset = st.selectbox(
             "Choose scoring preset",
-            list(SCORING_PRESETS.keys()),
-            index=1,
+            _preset_keys,
+            key="rule_preset_select",
+            help="Kids Conservative is safest for youth events. Adult Standard is the usual default.",
         )
         preset = SCORING_PRESETS[rule_preset]
         st.subheader("Safety Limits")
-        max_safe_weight_diff = st.slider("Do Not Match if weight gap is over:", 5, 60, preset["max_safe_weight_diff"], 5)
-        max_safe_age_diff = st.slider("Do Not Match if age gap is over:", 0, 5, preset["max_safe_age_diff"])
-        max_safe_skill_diff = st.slider("Do Not Match if skill/belt gap is over:", 0, 5, preset["max_safe_skill_diff"])
-        st.subheader("Scoring Weights")
-        same_academy_penalty = st.slider("Same-academy penalty", 0, 60, preset["same_academy_penalty"], 5)
-        entry_crossover_penalty = st.slider("Gi/No-Gi crossover penalty", 0, 60, preset["entry_crossover_penalty"], 5)
+        max_safe_weight_diff = st.slider(
+            "Do Not Match if weight gap is over (lbs):",
+            5, 60, preset["max_safe_weight_diff"], 5,
+            help="Weight difference in pounds. Larger gaps are marked unsafe.",
+        )
+        max_safe_age_diff = st.slider(
+            "Do Not Match if age gap is over (age groups):",
+            0, 5, preset["max_safe_age_diff"],
+            help="0 means only the same age group is allowed (best for kids).",
+        )
+        max_safe_skill_diff = st.slider(
+            "Do Not Match if skill/belt gap is over:",
+            0, 5, preset["max_safe_skill_diff"],
+        )
+        with st.expander("Advanced scoring weights"):
+            same_academy_penalty = st.slider("Same-academy penalty", 0, 60, preset["same_academy_penalty"], 5)
+            entry_crossover_penalty = st.slider("Gi/No-Gi crossover penalty", 0, 60, preset["entry_crossover_penalty"], 5)
 
     scoring_settings = {
         "max_safe_weight_diff": max_safe_weight_diff,
@@ -1485,13 +1659,13 @@ if data_ready:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        metric_card("Registrations", len(working_df), "Approved athletes currently analyzed")
+        metric_card("Athletes", len(working_df), "People currently being reviewed")
     with c2:
-        metric_card("Groups", len(summary), "Total active divisions/groups found")
+        metric_card("Divisions", len(summary), "Active brackets / groups in the file")
     with c3:
-        metric_card("Singles", len(singles), "Single-athlete divisions needing review")
+        metric_card("Alone Athletes", len(singles), "Divisions with only 1 athlete — need a partner or a move")
     with c4:
-        metric_card("Academy Conflicts", len(academy_conflict_groups), "2+ athlete divisions from one academy")
+        metric_card("Academy Issues", len(academy_conflict_groups), "Divisions where everyone is from the same academy")
 
     # ── Event Health Dashboard ────────────────────────────────────────────────
     _active_moves_count = sum(1 for m in st.session_state.get("moves", []) if m["status"] == "Active")
@@ -1506,24 +1680,33 @@ if data_ready:
         _event_status = "🟡 Almost ready — review remaining items"
         _status_color = "#fbbf24"
     else:
-        _event_status = "🔴 Action required"
+        _event_status = "🔴 Action required — start with Guided Mode below"
         _status_color = "#ef4444"
 
     st.markdown('<div class="ez-health-panel">', unsafe_allow_html=True)
     st.subheader("Event Health")
+    st.caption(
+        "This is your progress checklist. Alone athletes and academy issues count as problems. "
+        "Accepted moves count as resolved for this session (still apply them in Smoothcomp)."
+    )
     st.progress(_progress_val, text=f"{_active_moves_count} of {_total_problems} problems resolved — {_event_status}")
     _h1, _h2, _h3, _h4 = st.columns(4)
     with _h1:
         _c = "#ef4444" if len(singles) > 0 else "#22c55e"
-        st.markdown(f'<div class="ez-health-number" style="color:{_c}">{len(singles)}</div><div class="ez-health-label">Singles</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="ez-health-number" style="color:{_c}">{len(singles)}</div><div class="ez-health-label">Alone</div>', unsafe_allow_html=True)
     with _h2:
         _c = "#f97316" if len(academy_conflict_groups) > 0 else "#22c55e"
-        st.markdown(f'<div class="ez-health-number" style="color:{_c}">{len(academy_conflict_groups)}</div><div class="ez-health-label">Conflicts</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="ez-health-number" style="color:{_c}">{len(academy_conflict_groups)}</div><div class="ez-health-label">Academy Issues</div>', unsafe_allow_html=True)
     with _h3:
-        st.markdown(f'<div class="ez-health-number" style="color:#22c55e">{_active_moves_count}</div><div class="ez-health-label">Accepted Moves</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="ez-health-number" style="color:#22c55e">{_active_moves_count}</div><div class="ez-health-label">Moves Accepted</div>', unsafe_allow_html=True)
     with _h4:
-        _c = "#ef4444" if _may_resolve_count > 0 else "#94a3b8"
-        st.markdown(f'<div class="ez-health-number" style="color:{_c}">{_may_resolve_count}</div><div class="ez-health-label">May Self-Resolve</div>', unsafe_allow_html=True)
+        _c = "#fbbf24" if _may_resolve_count > 0 else "#94a3b8"
+        st.markdown(f'<div class="ez-health-number" style="color:{_c}">{_may_resolve_count}</div><div class="ez-health-label">May Fix Itself</div>', unsafe_allow_html=True)
+    if _may_resolve_count > 0:
+        st.caption(
+            f"{_may_resolve_count} alone division(s) have other athletes waiting on approval — "
+            "those may get partners without you moving anyone."
+        )
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Next Step Banner ──────────────────────────────────────────────────────
@@ -1552,16 +1735,25 @@ if data_ready:
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ── View Mode Toggle ──────────────────────────────────────────────────────
+    st.markdown("### Step 2 — Review recommendations")
     _view_mode = st.radio(
-        "View:",
+        "How do you want to review?",
         ["🃏 Guided Mode", "📋 Table Mode"],
         horizontal=True,
         key="view_mode_radio",
+        help=(
+            "Guided Mode: one athlete at a time — best if you're new. "
+            "Table Mode: full spreadsheet view for experienced directors."
+        ),
     )
     _guided_mode = _view_mode == "🃏 Guided Mode"
 
     # ── Guided Mode ───────────────────────────────────────────────────────────
     if _guided_mode:
+        st.caption(
+            "For each athlete: check the suggested move, then **Accept** (keep it) or **Skip** (come back later). "
+            "Open **Accepted this session** below to undo a move."
+        )
         _active_orig_divs = {
             m["original_division"] for m in st.session_state["moves"] if m["status"] == "Active"
         }
@@ -1595,7 +1787,7 @@ if data_ready:
             st.markdown('<div class="success-card">All problems resolved for this session.</div>', unsafe_allow_html=True)
         else:
             if not _display_singles.empty:
-                st.subheader(f"Singles — {len(_unresolved)} remaining")
+                st.subheader(f"Alone athletes — {len(_unresolved)} remaining")
             for _ci, (_, _sr) in enumerate(_display_singles.iterrows()):
                 _grp = _sr["group"]
                 _name = _sr["names"]
@@ -1623,11 +1815,11 @@ if data_ready:
                     _ca, _cb = st.columns([3, 1])
                     with _ca:
                         st.markdown(f"**{_card_icon} {_name}** · {_acad}")
-                        st.caption(_grp)
+                        st.caption(f"Currently in: {_grp}")
                         if _pi["pending_count"] > 0:
                             st.caption(_pi["label"])
                         else:
-                            st.caption("— No pending athletes in this division")
+                            st.caption("No other athletes waiting on approval in this division")
                     with _cb:
                         if _has_rec:
                             _q = str(_best["Quality"])
@@ -1636,7 +1828,7 @@ if data_ready:
                             st.markdown(f'<div style="text-align:right;font-size:20px;font-weight:900;color:#f8fafc">{int(_best["Match Score"])}</div>', unsafe_allow_html=True)
 
                     if _has_rec and str(_best.get("Safety Flag", "")).strip() == "":
-                        st.markdown(f"**Move to:** {_best['Suggested Division']}")
+                        st.markdown(f"**Suggested move →** {_best['Suggested Division']}")
                         _bullets = build_safety_bullets(_best)
                         st.caption("  ·  ".join(_bullets))
 
@@ -1644,11 +1836,11 @@ if data_ready:
                             _all_recs = recommendations[recommendations["Current Division"] == _grp].sort_values("Rank")
                             for _, _rr in _all_recs.iterrows():
                                 _flag = str(_rr.get("Safety Flag", "")).strip()
-                                _lbl = "⛔ Do Not Match" if _flag else f"Rank {int(_rr['Rank'])} · Score {int(_rr['Match Score'])} · {_rr['Quality']}"
+                                _lbl = "⛔ Do Not Match (unsafe)" if _flag else f"Option {int(_rr['Rank'])} · Score {int(_rr['Match Score'])} · {_rr['Quality']}"
                                 st.markdown(f"**{_lbl}** → {_rr['Suggested Division']}")
                                 st.caption(str(_rr.get("Why", ""))[:100])
                                 if not _flag:
-                                    if st.button(f"Accept rank {int(_rr['Rank'])}", key=f"{_card_key}_alt_{int(_rr['Rank'])}"):
+                                    if st.button(f"Accept option {int(_rr['Rank'])}", key=f"{_card_key}_alt_{int(_rr['Rank'])}"):
                                         st.session_state["moves"].append({
                                             "athlete_name": _name,
                                             "original_division": _grp,
@@ -1662,14 +1854,14 @@ if data_ready:
                                         st.session_state["guided_skipped"].discard(_grp)
                                         st.rerun()
                     elif _has_rec and str(_best.get("Safety Flag", "")).strip():
-                        st.markdown("**⛔ No safe match available** — all options exceed safety limits.")
-                        st.caption("Adjust safety sliders in the sidebar or check Table Mode for details.")
+                        st.markdown("**⛔ No safe match available** — every option breaks your safety limits.")
+                        st.caption("Try a different rule preset in the sidebar, or leave this athlete for manual review.")
                     else:
                         st.markdown("**⛔ No recommendations generated** for this division.")
 
                     _btn_cols = st.columns([2, 1, 1])
                     with _btn_cols[1]:
-                        _skip_label = "Un-skip" if _is_skipped else "Skip ›"
+                        _skip_label = "Bring back" if _is_skipped else "Skip for now"
                         if st.button(_skip_label, key=f"{_card_key}_skip"):
                             if _is_skipped:
                                 st.session_state["guided_skipped"].discard(_grp)
@@ -1678,7 +1870,7 @@ if data_ready:
                             st.rerun()
                     with _btn_cols[2]:
                         if _has_rec and str(_best.get("Safety Flag", "")).strip() == "":
-                            _accept_label = "Accept Anyway ✓" if _pi["impact"] == "resolves" else "✓ Accept"
+                            _accept_label = "Accept anyway ✓" if _pi["impact"] == "resolves" else "✓ Accept this move"
                             if st.button(_accept_label, key=f"{_card_key}_accept", type="primary"):
                                 st.session_state["moves"].append({
                                     "athlete_name": _name,
@@ -1766,9 +1958,10 @@ if data_ready:
                                 st.session_state["moves"][_full_idx]["status"] = "Reverted"
                                 st.rerun()
                         _note_input = st.text_input(
-                            "Add note:", key=f"g_note_{_full_idx}",
+                            "Internal note (optional):",
+                            key=f"g_note_{_full_idx}",
                             value=_rm["director_notes"],
-                            placeholder="Director notes…",
+                            placeholder="e.g. Coach approved this move",
                         )
                         if _note_input != _rm["director_notes"]:
                             if _full_idx is not None:
@@ -1882,15 +2075,28 @@ if data_ready:
 
             if not best_matches.empty:
                 st.divider()
+                _safe_best = best_matches[
+                    best_matches["Safety Flag"].astype(str).str.strip().eq("")
+                    & ~best_matches["Quality"].astype(str).eq("Do Not Match")
+                ].copy()
+                _blocked_best = best_matches.loc[
+                    ~best_matches.index.isin(_safe_best.index)
+                ]
+                if not _blocked_best.empty:
+                    st.caption(
+                        f"{len(_blocked_best)} recommendation(s) are marked Do Not Match / unsafe "
+                        "and cannot be accepted here."
+                    )
                 _accept_col1, _accept_col2 = st.columns([4, 1])
                 _accept_options = ["— select athlete —"] + sorted(
-                    best_matches["Athlete"].dropna().unique().tolist()
+                    _safe_best["Athlete"].dropna().unique().tolist()
                 )
                 with _accept_col1:
                     _athlete_to_accept = st.selectbox(
-                        "Accept a move:",
+                        "Accept a safe move:",
                         _accept_options,
                         key="accept_athlete_selectbox",
+                        help="Only athletes with safe recommendations are listed.",
                     )
                 with _accept_col2:
                     st.write("")
@@ -1900,18 +2106,26 @@ if data_ready:
                         key="accept_move_btn",
                     )
                 if _accept_clicked and _athlete_to_accept != "— select athlete —":
-                    _row = best_matches[best_matches["Athlete"] == _athlete_to_accept].iloc[0]
-                    st.session_state["moves"].append({
-                        "athlete_name": _athlete_to_accept,
-                        "original_division": str(_row["Current Division"]),
-                        "new_division": str(_row["Suggested Division"]),
-                        "score": int(_row["Match Score"]),
-                        "academy_warning": str(_row.get("Academy Warning", "")),
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "director_notes": "",
-                        "status": "Active",
-                    })
-                    st.rerun()
+                    _row = _safe_best[_safe_best["Athlete"] == _athlete_to_accept].iloc[0]
+                    _flag = str(_row.get("Safety Flag", "")).strip()
+                    _quality = str(_row.get("Quality", "")).strip()
+                    if _flag or _quality == "Do Not Match":
+                        st.error(
+                            "This recommendation exceeds safety limits (Do Not Match) "
+                            "and cannot be accepted."
+                        )
+                    else:
+                        st.session_state["moves"].append({
+                            "athlete_name": _athlete_to_accept,
+                            "original_division": str(_row["Current Division"]),
+                            "new_division": str(_row["Suggested Division"]),
+                            "score": int(_row["Match Score"]),
+                            "academy_warning": str(_row.get("Academy Warning", "")),
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "director_notes": "",
+                            "status": "Active",
+                        })
+                        st.rerun()
 
         with tab2:
             _disp_all = (
@@ -1921,8 +2135,11 @@ if data_ready:
             st.dataframe(style_quality_rows(_disp_all), use_container_width=True)
 
         with tab3:
-            st.markdown("### Director Report")
-            st.write("Download reports your staff can use to make bracket updates.")
+            st.markdown("### Step 3 — Download your reports")
+            st.write(
+                "These files help you (or your staff) apply moves in Smoothcomp. "
+                "The **Copy Action Plan** at the bottom is usually the easiest day-of checklist."
+            )
             rank1_all = recommendations[recommendations["Rank"] == 1].copy()
             rank1_conflicts = academy_conflict_recommendations[
                 academy_conflict_recommendations["Rank"] == 1
@@ -1931,14 +2148,15 @@ if data_ready:
 
             if not export_action_plan.empty:
                 st.download_button(
-                    "Download Action Plan CSV",
+                    "📥 Download Action Plan CSV",
                     data=to_csv_bytes(export_action_plan),
                     file_name="ez_brackets_action_plan.csv",
                     mime="text/csv",
+                    help="Top recommendation for each problem division.",
                 )
 
             st.download_button(
-                "Download Rank #1 Excel Report",
+                "📥 Download Rank #1 Excel Report",
                 data=to_excel_bytes(
                     rank1_all,
                     singles,
@@ -1947,28 +2165,32 @@ if data_ready:
                 ),
                 file_name="ez_brackets_rank1_recommendations.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Excel workbook with the best suggestion per alone athlete / conflict.",
             )
 
             st.download_button(
-                "Download All Suggestions CSV",
+                "📥 Download All Suggestions CSV",
                 data=to_csv_bytes(recommendations),
                 file_name="ez_brackets_all_single_suggestions.csv",
                 mime="text/csv",
+                help="Every ranked suggestion, not just the top pick.",
             )
 
             if not academy_conflict_recommendations.empty:
                 st.download_button(
-                    "Download Academy Conflict CSV",
+                    "📥 Download Academy Conflict CSV",
                     data=to_csv_bytes(academy_conflict_recommendations),
                     file_name="ez_brackets_academy_conflicts.csv",
                     mime="text/csv",
+                    help="Suggestions for same-academy brackets.",
                 )
 
             st.download_button(
-                "Download Full Excel Report",
+                "📥 Download Full Excel Report",
                 data=to_excel_bytes(recommendations, singles, summary, academy_conflict_recommendations),
                 file_name="ez_brackets_full_recommendations.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Complete workbook with all recommendation sheets.",
             )
 
             _export_plan_text = format_action_plan_text(st.session_state.get("moves", []))
@@ -2117,6 +2339,9 @@ if data_ready:
 
 else:
     st.markdown(
-        '<div class="section-card">Upload a Smoothcomp CSV, map columns from another registration system, or choose demo data to begin analyzing divisions.</div>',
+        '<div class="section-card">'
+        '<b>Ready when you are.</b> Upload a Smoothcomp CSV, map columns from another '
+        'registration system, or choose sample data above to begin.'
+        '</div>',
         unsafe_allow_html=True,
     )

@@ -66,4 +66,4 @@ streamlit run app.py
 
 ## Live App
 
-https://ez-brackets-pc6appxh4cvycfxvkhv5nc4.streamlit.app/
+https://ez-brackets.streamlit.app/
