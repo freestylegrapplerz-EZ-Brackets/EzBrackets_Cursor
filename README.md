@@ -1,6 +1,8 @@
-# EZ Brackets
+# EZ Brackets (v1.0)
 
 EZ Brackets is a Streamlit app for tournament directors who need to find single-athlete divisions in Smoothcomp registration exports and identify the best possible bracket merge options.
+
+**Important:** EZ Brackets plans moves and builds an Action Plan. It does **not** update Smoothcomp for you — apply accepted moves in Smoothcomp before publishing brackets.
 
 Built for Freestyle Grapplerz, the app reviews Smoothcomp CSV data or mapped CSV files from other registration systems, detects divisions with only one athlete, scores possible matches, flags academy-only matchups, marks unsafe jumps as Do Not Match, and exports director-ready Excel reports.
 
