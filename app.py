@@ -9,8 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.2.1
-# Fix false same-academy, Smoothcomp Club vs Team, Teen gender/age labels
+# EZ BRACKETS - v1.2.2
+# Fix Juvenile 16-17 label detection for Adult step-up matches
 # =========================
 
 st.set_page_config(
@@ -1095,18 +1095,29 @@ def before_after_text(source_label, source_count, target_label, target_count):
     return f"Before: {source_label} has {source_count}; {target_label} has {target_count}. After: {target_label} would have {after_count}."
 
 
-def is_juvenile_16_17(age_label):
-    """Juvenile / Youth bands that are effectively 16-17."""
-    a = str(age_label or "").lower()
-    if "juvenile" in a:
-        nums = [int(n) for n in re.findall(r"\d+", a)]
-        if not nums:
+def is_juvenile_16_17(age_label, context_label=""):
+    """Juvenile / Youth bands that are effectively 16-17.
+
+    Smoothcomp often splits this as:
+      group: ``Juvenile No-Gi (male) / Intermediate / 16 - 17 years old / ...``
+    so the age slot is only ``16 - 17 years old`` (no word Juvenile).
+    Pass the full group/entry as ``context_label`` so those still count.
+    """
+    a = str(age_label or "").lower().strip()
+    ctx = str(context_label or "").lower().strip()
+    blob = f"{a} {ctx}".strip()
+    mid = age_year_midpoint(age_label)
+    years_16_17 = mid is not None and 16 <= mid < 18
+
+    if "juvenile" in a or "juvenile" in ctx:
+        if mid is None:
             return True
-        return (sum(nums) / len(nums)) >= 16
-    if "youth" in a:
-        nums = [int(n) for n in re.findall(r"\d+", a)]
-        if nums:
-            return (sum(nums) / len(nums)) >= 16
+        return mid >= 16
+    if "youth" in a or ("youth" in ctx and "juvenile" not in ctx):
+        return bool(years_16_17)
+    # Bare year band used inside Juvenile divisions: "16 - 17 years old" / "16-17yrs"
+    if years_16_17 and ("years old" in a or "yrs" in a or "year old" in a):
+        return True
     return False
 
 
@@ -1203,7 +1214,8 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
     cw = weight_mid(tgt_weight)
     weight_diff = abs(sw - cw) if sw is not None and cw is not None else 999
 
-    juv_to_adult = is_juvenile_16_17(src_age) and is_adult_age(tgt_age)
+    src_context = str(single.get("group_clean", "") or single.get("entry_clean", "") or "")
+    juv_to_adult = is_juvenile_16_17(src_age, src_context) and is_adult_age(tgt_age)
     # Juvenile 16-17 → Adult is one practical age step (Adult starts at 18).
     age_diff = 1 if juv_to_adult else raw_age_diff
 
