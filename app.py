@@ -9,7 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.0
+# EZ BRACKETS - v1.1
+# Event rules (gender hard-exclude, Juvenile→Adult) + Save/Resume Progress
 # =========================
 
 st.set_page_config(
