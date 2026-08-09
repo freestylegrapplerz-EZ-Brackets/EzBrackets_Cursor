@@ -9,7 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.0
+# EZ BRACKETS - v1.1
+# Event rules (gender hard-exclude, Juvenile→Adult) + Save/Resume Progress
 # =========================
 
 st.set_page_config(
@@ -370,6 +371,24 @@ st.markdown(
     .ez-sticky-progress .ez-pill-amber { background: rgba(251,191,36,0.16); color: #fde68a; }
     .ez-sticky-progress .ez-pill-red { background: rgba(239,68,68,0.16); color: #fecaca; }
 
+    .ez-save-panel {
+        padding: 14px 16px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, rgba(14, 116, 144, 0.22), rgba(15, 23, 42, 0.88));
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        margin: 0 0 16px 0;
+    }
+    .ez-save-panel h4 {
+        margin: 0 0 4px 0;
+        color: #e0f2fe;
+        font-size: 16px;
+    }
+    .ez-save-panel p {
+        margin: 0 0 10px 0;
+        color: #94a3b8;
+        font-size: 13px;
+    }
+
     .ez-focus-card {
         padding: 22px 24px 18px 24px;
         border-radius: 20px;
@@ -516,6 +535,14 @@ GENDER_TOKENS = {
     "male", "female", "m", "f", "men", "women",
     "boy", "boys", "girl", "girls", "man", "woman",
 }
+MALE_GENDER_TOKENS = {"male", "m", "men", "man", "boy", "boys"}
+FEMALE_GENDER_TOKENS = {"female", "f", "women", "woman", "girl", "girls"}
+
+# Younger youth stay mixed; separation starts at Youth 14-15.
+MIXED_GENDER_AGE_HINTS = (
+    "mighty mite", "pee wee", "kindergarten",
+    "youth 6-7", "youth 8-9", "youth 10-11", "youth 12-13",
+)
 
 
 def find_col(df, possible_names):
@@ -532,12 +559,71 @@ def find_col(df, possible_names):
     return None
 
 
-def parse_group(group):
-    """Split a Smoothcomp-style group into entry/skill/age/weight.
+def extract_gender(text):
+    """Return 'male', 'female', or '' from division/entry labels.
 
-    Gender tokens (Male/Female/etc.) are removed so 5-part paths like
-    ``Gi / Blue / Male / Adult / 150 - 159 lbs`` still parse correctly.
+    Supports slash tokens (Male/Female) and entry prefixes (Men No-Gi, Women Gi).
+    Checks female markers before male so 'women' is not misread as 'men'.
     """
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return ""
+    # Exact slash/segment tokens first
+    for part in re.split(r"[/]", raw):
+        token = part.strip().lower()
+        if token in FEMALE_GENDER_TOKENS:
+            return "female"
+        if token in MALE_GENDER_TOKENS:
+            return "male"
+        # Entry-style "women no-gi" / "men gi"
+        for word in re.split(r"[\s_\-]+", token):
+            if word in FEMALE_GENDER_TOKENS:
+                return "female"
+            if word in MALE_GENDER_TOKENS:
+                return "male"
+    if re.search(r"\b(women|female|girls?|woman)\b", raw):
+        return "female"
+    if re.search(r"\b(men|male|boys?|man)\b", raw):
+        return "male"
+    return ""
+
+
+def age_requires_gender_separation(age_label):
+    """True when opposite-gender matches must be hard-excluded."""
+    a = str(age_label or "").lower()
+    if not a:
+        return False
+    for hint in MIXED_GENDER_AGE_HINTS:
+        if hint in a:
+            return False
+    if "youth" in a:
+        nums = [int(n) for n in re.findall(r"\d+", a)]
+        if nums:
+            return (sum(nums) / len(nums)) >= 14
+        return False  # bare "Youth" without ages → treat as mixed kids
+    for key in ("teen", "juvenile", "adult", "master", "senior"):
+        if key in a:
+            return True
+    return False
+
+
+def genders_compatible(single_gender, single_age, cand_gender, cand_age):
+    """Hard gender gate. Younger youth may mix; 14+ / Teen+ may not."""
+    if not age_requires_gender_separation(single_age) and not age_requires_gender_separation(cand_age):
+        return True
+    if single_gender and cand_gender and single_gender != cand_gender:
+        return False
+    return True
+
+
+def parse_group(group):
+    """Split a Smoothcomp-style group into entry/skill/age/weight/gender.
+
+    Gender tokens (Male/Female/etc.) are removed from field slots so 5-part paths
+    like ``Gi / Blue / Male / Adult / 150 - 159 lbs`` still parse correctly, but
+    gender is returned separately for compatibility checks.
+    """
+    gender = extract_gender(group)
     parts = [p.strip() for p in str(group).split("/") if str(p).strip()]
     parts = [p for p in parts if p.lower() not in GENDER_TOKENS]
 
@@ -558,7 +644,11 @@ def parse_group(group):
             age = parts[weight_idx - 1] if weight_idx - 1 >= 2 else age
             skill = parts[1] if len(parts) > 1 else skill
 
-    return entry, skill, age, weight
+    # Entry prefixes like "Men No-Gi" still carry gender even after slash stripping.
+    if not gender:
+        gender = extract_gender(entry)
+
+    return entry, skill, age, weight, gender
 
 
 def skill_value(skill):
@@ -633,6 +723,7 @@ def normalize_dataframe(raw_df):
     df["skill_clean"] = parsed.apply(lambda x: x[1])
     df["age_clean"] = parsed.apply(lambda x: x[2])
     df["weight_clean"] = parsed.apply(lambda x: x[3])
+    df["gender_clean"] = parsed.apply(lambda x: x[4])
 
     return df
 
@@ -654,6 +745,7 @@ def normalize_mapped_dataframe(raw_df, mapping):
     df["skill_clean"] = mapped_series("skill", "")
     df["age_clean"] = mapped_series("age", "")
     df["weight_clean"] = mapped_series("weight", "")
+    df["gender_clean"] = df["entry_clean"].apply(extract_gender)
 
     group_col = mapping.get("group", "")
     if group_col and group_col in df.columns:
@@ -663,6 +755,7 @@ def normalize_mapped_dataframe(raw_df, mapping):
         df["skill_clean"] = df["skill_clean"].where(df["skill_clean"].str.strip().ne(""), parsed.apply(lambda x: x[1]))
         df["age_clean"] = df["age_clean"].where(df["age_clean"].str.strip().ne(""), parsed.apply(lambda x: x[2]))
         df["weight_clean"] = df["weight_clean"].where(df["weight_clean"].str.strip().ne(""), parsed.apply(lambda x: x[3]))
+        df["gender_clean"] = df["gender_clean"].where(df["gender_clean"].astype(str).str.strip().ne(""), parsed.apply(lambda x: x[4]))
     else:
         df["group_clean"] = (
             df["entry_clean"].astype(str)
@@ -682,6 +775,9 @@ def group_summary(df):
     for group, g in df.groupby("group_clean", dropna=False):
         sample = g.iloc[0]
         academies = sorted(set([a for a in g["academy_clean"].dropna().astype(str).tolist() if a.strip()]))
+        gender = str(sample.get("gender_clean", "") or "").strip()
+        if not gender:
+            gender = extract_gender(group) or extract_gender(sample.get("entry_clean", ""))
         rows.append({
             "group": group,
             "athletes": len(g),
@@ -689,6 +785,7 @@ def group_summary(df):
             "skill": sample.get("skill_clean", ""),
             "age": sample.get("age_clean", ""),
             "weight": sample.get("weight_clean", ""),
+            "gender": gender,
             "names": ", ".join(g["athlete_name"].astype(str).tolist()),
             "academies": ", ".join(academies),
             "academy_count": len(academies),
@@ -804,18 +901,65 @@ def before_after_text(source_label, source_count, target_label, target_count):
     return f"Before: {source_label} has {source_count}; {target_label} has {target_count}. After: {target_label} would have {after_count}."
 
 
+def is_juvenile_16_17(age_label):
+    """Juvenile / Youth bands that are effectively 16-17."""
+    a = str(age_label or "").lower()
+    if "juvenile" in a:
+        nums = [int(n) for n in re.findall(r"\d+", a)]
+        if not nums:
+            return True
+        return (sum(nums) / len(nums)) >= 16
+    if "youth" in a:
+        nums = [int(n) for n in re.findall(r"\d+", a)]
+        if nums:
+            return (sum(nums) / len(nums)) >= 16
+    return False
+
+
+def is_adult_age(age_label):
+    a = str(age_label or "").lower()
+    return "adult" in a and "master" not in a and "pre" not in a
+
+
 def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=None):
     settings = {**DEFAULT_SCORING_SETTINGS, **(scoring_settings or {})}
 
     if not allow_entry_crossover and not same_entry(single.get("entry_clean", ""), cand.get("entry", "")):
         return None
 
-    skill_diff = abs(skill_value(single.get("skill_clean", "")) - skill_value(cand.get("skill", "")))
-    age_diff = abs(age_value(single.get("age_clean", "")) - age_value(cand.get("age", "")))
+    # Hard gender exclusion (before scoring), same pattern as Gi/No-Gi gate.
+    single_gender = (
+        str(single.get("gender_clean", "") or "").strip()
+        or extract_gender(single.get("group_clean", ""))
+        or extract_gender(single.get("entry_clean", ""))
+    )
+    cand_gender = (
+        str(cand.get("gender", "") or "").strip()
+        or extract_gender(cand.get("group", ""))
+        or extract_gender(cand.get("entry", ""))
+    )
+    if not genders_compatible(
+        single_gender,
+        single.get("age_clean", ""),
+        cand_gender,
+        cand.get("age", ""),
+    ):
+        return None
+
+    src_skill = single.get("skill_clean", "")
+    tgt_skill = cand.get("skill", "")
+    src_age = single.get("age_clean", "")
+    tgt_age = cand.get("age", "")
+    skill_diff = abs(skill_value(src_skill) - skill_value(tgt_skill))
+    raw_age_diff = abs(age_value(src_age) - age_value(tgt_age))
 
     sw = weight_mid(single.get("weight_clean", ""))
     cw = weight_mid(cand.get("weight", ""))
     weight_diff = abs(sw - cw) if sw is not None and cw is not None else 999
+
+    juv_to_adult = is_juvenile_16_17(src_age) and is_adult_age(tgt_age)
+    # Juvenile 16-17 → Adult is one practical age step (Adult starts at 18).
+    age_diff = 1 if juv_to_adult else raw_age_diff
 
     score = 100
     reasons = []
@@ -885,6 +1029,12 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
     if age_diff == 0:
         reasons.append("same age group")
         breakdown.append("Age: 0")
+    elif juv_to_adult:
+        # Same ballpark as a normal one-age-group step (Adult starts at 18).
+        penalty = settings["one_age_penalty"]
+        score -= penalty
+        reasons.append("Juvenile 16-17 into Adult (normal step up)")
+        breakdown.append(f"Juvenile→Adult age step: -{penalty}")
     elif age_diff == 1:
         penalty = settings["one_age_penalty"]
         score -= penalty
@@ -901,8 +1051,41 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
         reasons.append("major age group jump")
         breakdown.append(f"Major age group jump: -{penalty}")
 
-    if age_diff != 999 and age_diff > settings["max_safe_age_diff"]:
+    # Juvenile→Adult is an expected step; do not hard-block on age safety limit.
+    if (not juv_to_adult) and age_diff != 999 and age_diff > settings["max_safe_age_diff"]:
         safety_flags.append(f"Age gap over {settings['max_safe_age_diff']} group(s)")
+
+    # Director preference (Juvenile 16-17 → Adult):
+    # - Prefer Adult Novice (slightly easier) over Adult Beginner
+    # - Prefer same-weight Adult over heavier; lighter Adult is acceptable
+    # - Adult options should beat a 20 lb Juvenile jump, but not a 10 lb Juvenile jump
+    if juv_to_adult:
+        src_sv = skill_value(src_skill)
+        tgt_sv = skill_value(tgt_skill)
+        if src_sv != 999 and tgt_sv != 999 and tgt_sv < src_sv and (src_sv - tgt_sv) <= 1:
+            # Moving into a slightly easier Adult skill is intentional — do not
+            # keep the normal one-level skill penalty.
+            if skill_diff == 1:
+                refund = settings["one_skill_penalty"]
+                score += refund
+                breakdown.append(f"Juvenile→Adult skill penalty waived: +{refund}")
+            score += 3
+            reasons.append("younger athlete gets skill advantage into Adult")
+            breakdown.append("Juvenile→Adult skill advantage: +3")
+        if sw is not None and cw is not None:
+            if 0 < (sw - cw) <= 10:
+                # Soften the adjacent-class penalty for a helpful lighter Adult class.
+                if weight_diff <= 10:
+                    soften = max(0, settings["adjacent_class_penalty"] - 3)
+                    score += soften
+                    breakdown.append(f"Juvenile→Adult lighter-class soften: +{soften}")
+                score += 2
+                reasons.append("younger athlete gets ~1 class weight advantage into Adult")
+                breakdown.append("Juvenile→Adult weight advantage: +2")
+            elif 0 < (cw - sw) <= 10:
+                score -= 2
+                reasons.append("Adult target is 1 weight class heavier")
+                breakdown.append("Juvenile→Adult heavier target: -2")
 
     academy_mix, academy_count = academy_mix_after_move(single.get("academy_clean", ""), cand.get("academies", ""))
 
@@ -1027,6 +1210,8 @@ def score_conflict_candidate(problem, cand, allow_entry_crossover=False, scoring
         "age_clean": problem.get("age", ""),
         "weight_clean": problem.get("weight", ""),
         "academy_clean": problem.get("academies", ""),
+        "gender_clean": problem.get("gender", ""),
+        "group_clean": problem.get("group", ""),
     }
     return score_candidate(problem_as_single, cand, allow_entry_crossover, scoring_settings)
 
@@ -1580,7 +1765,41 @@ def append_accepted_move(athlete_name, original_division, new_division, score, a
     })
 
 
-def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash="", manual_review=None, guided_layout=""):
+def build_session_payload():
+    """Build the current progress payload for Save Progress."""
+    active = [m for m in st.session_state.get("moves", []) if m.get("status") == "Active"]
+    skipped = st.session_state.get("guided_skipped", set())
+    manual = st.session_state.get("manual_review", set())
+    return {
+        "ez_brackets_version": "1.0",
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "moves": st.session_state.get("moves", []),
+        "guided_skipped": list(skipped) if skipped else [],
+        "manual_review": list(manual) if manual else [],
+        "last_preset": st.session_state.get("last_preset", ""),
+        "view_mode": st.session_state.get("view_mode_radio", "🃏 Guided Mode"),
+        "guided_layout": st.session_state.get("guided_layout_radio", "Focus Mode"),
+        "focus_index": int(st.session_state.get("focus_index", 0) or 0),
+        "csv_hash": st.session_state.get("csv_hash", ""),
+        "active_moves": len(active),
+        "skipped_count": len(skipped),
+        "manual_count": len(manual),
+    }
+
+
+def session_has_progress():
+    """True when there is anything worth saving/resuming."""
+    moves = st.session_state.get("moves", [])
+    if any(m.get("status") == "Active" for m in moves):
+        return True
+    if st.session_state.get("guided_skipped"):
+        return True
+    if st.session_state.get("manual_review"):
+        return True
+    return False
+
+
+def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash="", manual_review=None, guided_layout="", focus_index=0):
     """Serialize session state to a JSON-safe dict."""
     return {
         "ez_brackets_version": "1.0",
@@ -1591,6 +1810,7 @@ def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash="", manua
         "last_preset": preset,
         "view_mode": view_mode,
         "guided_layout": guided_layout or "",
+        "focus_index": int(focus_index or 0),
         "csv_hash": csv_hash or "",
     }
 
@@ -1627,17 +1847,41 @@ def apply_restored_session(result):
         saved_view = "📋 Advanced Table View"
     if saved_view in ("🃏 Guided Mode", "📋 Advanced Table View"):
         st.session_state["view_mode_radio"] = saved_view
+    else:
+        st.session_state["view_mode_radio"] = "🃏 Guided Mode"
     saved_layout = result.get("guided_layout", "")
     if saved_layout in ("Focus Mode", "Queue View"):
         st.session_state["guided_layout_radio"] = saved_layout
-    st.session_state["focus_index"] = 0
+    else:
+        st.session_state["guided_layout_radio"] = "Focus Mode"
+    try:
+        st.session_state["focus_index"] = max(0, int(result.get("focus_index", 0) or 0))
+    except (TypeError, ValueError):
+        st.session_state["focus_index"] = 0
     st.session_state["restore_key_counter"] = st.session_state.get("restore_key_counter", 0) + 1
     st.session_state["restore_csv_hash"] = result.get("csv_hash", "")
+    active_n = sum(1 for m in result.get("moves", []) if m.get("status") == "Active")
+    skipped_n = len(result.get("guided_skipped", []) or [])
+    manual_n = len(result.get("manual_review", []) or [])
     st.session_state["restore_notice"] = (
-        f"Session restored — {len(result['moves'])} move(s) loaded"
+        f"Resumed progress — {active_n} move(s) planned, {skipped_n} skipped, "
+        f"{manual_n} manual review"
         + (f" (saved {result.get('saved_at', '')})" if result.get("saved_at") else "")
-        + "."
+        + ". Continue in Focus Mode below."
     )
+
+
+def try_restore_uploaded_session(uploaded_file):
+    """Validate/apply an uploaded session file. Returns error string or None."""
+    try:
+        data = json.load(uploaded_file)
+    except (json.JSONDecodeError, Exception) as exc:
+        return f"Could not read session file: {exc}"
+    ok, result = restore_session_from_json(data)
+    if not ok:
+        return result
+    apply_restored_session(result)
+    return None
 
 
 def check_move_back_alerts(moves, current_summary):
@@ -1701,6 +1945,28 @@ if not st.session_state.get("has_data", False):
         "2. Review each recommendation in Focus Mode  \n"
         "3. Download your Action Plan and apply the moves in Smoothcomp before publishing"
     )
+    st.markdown('<div class="ez-save-panel">', unsafe_allow_html=True)
+    st.markdown("#### Resume Progress")
+    st.caption(
+        "Coming back mid-event? Upload your saved `.json` session first, then load the same registration CSV."
+    )
+    _landing_resume = st.file_uploader(
+        "Upload saved progress (.json)",
+        type=["json"],
+        key=f"landing_resume_{st.session_state.get('restore_key_counter', 0)}",
+        help="Restores moves planned, skipped, manual review, and Focus position.",
+    )
+    if _landing_resume is not None:
+        _err = try_restore_uploaded_session(_landing_resume)
+        if _err:
+            st.error(_err)
+        else:
+            st.rerun()
+    if st.session_state.get("restore_notice"):
+        st.success(st.session_state.get("restore_notice"))
+        if st.session_state.get("restore_csv_hash") and not st.session_state.get("csv_hash"):
+            st.info("Next: load the same registration CSV below so your divisions match.")
+    st.markdown("</div>", unsafe_allow_html=True)
 else:
     _cs = st.session_state
     st.markdown(
@@ -1855,55 +2121,32 @@ if data_ready:
     with st.sidebar:
         st.subheader("Session")
         st.caption("Save before closing. Restore later to continue. EZ Brackets never updates Smoothcomp for you.")
-        _active_for_save = [m for m in st.session_state.get("moves", []) if m["status"] == "Active"]
-        if _active_for_save:
-            _sj = session_to_json(
-                st.session_state.get("moves", []),
-                st.session_state.get("guided_skipped", set()),
-                st.session_state.get("last_preset", ""),
-                st.session_state.get("view_mode_radio", "🃏 Guided Mode"),
-                csv_hash=st.session_state.get("csv_hash", ""),
-                manual_review=st.session_state.get("manual_review", set()),
-                guided_layout=st.session_state.get("guided_layout_radio", "Focus Mode"),
-            )
+        if session_has_progress():
+            _sj = build_session_payload()
             st.download_button(
-                "💾 Save Session",
+                "💾 Save Progress",
                 data=json.dumps(_sj, indent=2).encode("utf-8"),
                 file_name=f"ez_brackets_session_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
                 mime="application/json",
                 key="sidebar_save_session",
-                help="Save accepted moves, notes, skipped/manual items, preset, and view mode.",
+                help="Save moves planned, skipped/manual items, Focus position, preset, and view mode.",
             )
+        else:
+            st.caption("No progress to save yet — accept, skip, or mark a decision first.")
         _restore_file = st.file_uploader(
-            "Restore session (.json)",
+            "Resume Progress (.json)",
             type=["json"],
             key=f"restore_session_{st.session_state['restore_key_counter']}",
             help="Upload a previously saved EZ Brackets session file.",
         )
         if _restore_file is not None:
-            try:
-                _rdata = json.load(_restore_file)
-                _ok, _result = restore_session_from_json(_rdata)
-                if _ok:
-                    apply_restored_session(_result)
-                    st.rerun()
-                else:
-                    st.error(_result)
-            except (json.JSONDecodeError, Exception) as _e:
-                st.error(f"Could not read session file: {_e}")
+            _err = try_restore_uploaded_session(_restore_file)
+            if _err:
+                st.error(_err)
+            else:
+                st.rerun()
         if st.session_state.get("restore_notice"):
-            st.success(st.session_state.pop("restore_notice"))
-            _saved_hash = st.session_state.get("restore_csv_hash", "")
-            _current_hash = st.session_state.get("csv_hash", "")
-            if _saved_hash and _current_hash and _saved_hash != _current_hash:
-                st.warning(
-                    "This registration file looks different from the one used when the session was saved. "
-                    "Double-check that your accepted moves still make sense."
-                )
-            elif _saved_hash and not _current_hash:
-                st.info(
-                    "Moves restored. Load the same registration CSV you used before so the divisions match."
-                )
+            st.success(st.session_state.get("restore_notice"))
 
         st.divider()
         st.subheader("Rule Preset")
@@ -2077,6 +2320,53 @@ if data_ready:
         """,
         unsafe_allow_html=True,
     )
+
+    # ── Save / Resume Progress (main workflow — easy to find mid-event) ───────
+    if st.session_state.get("restore_notice"):
+        st.success(st.session_state.pop("restore_notice"))
+        _saved_hash = st.session_state.get("restore_csv_hash", "")
+        _current_hash = st.session_state.get("csv_hash", "")
+        if _saved_hash and _current_hash and _saved_hash != _current_hash:
+            st.warning(
+                "This registration file looks different from the one used when the session was saved. "
+                "Double-check that your accepted moves still make sense."
+            )
+
+    st.markdown('<div class="ez-save-panel">', unsafe_allow_html=True)
+    st.markdown("#### Save / Resume Progress")
+    st.caption(
+        "Save before you leave. Resume later with the same CSV + this file — "
+        "picks up moves planned, skipped, manual review, and Focus position."
+    )
+    _sp1, _sp2 = st.columns(2)
+    with _sp1:
+        if session_has_progress():
+            _main_sj = build_session_payload()
+            st.download_button(
+                "💾 Save Progress",
+                data=json.dumps(_main_sj, indent=2).encode("utf-8"),
+                file_name=f"ez_brackets_session_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                mime="application/json",
+                key="main_save_progress",
+                type="primary",
+                help="Download your mid-event progress as a .json file.",
+            )
+        else:
+            st.caption("Accept, skip, or mark a decision to enable Save Progress.")
+    with _sp2:
+        _main_resume = st.file_uploader(
+            "Resume Progress (.json)",
+            type=["json"],
+            key=f"main_resume_{st.session_state.get('restore_key_counter', 0)}",
+            help="Upload a previously saved progress file.",
+        )
+        if _main_resume is not None:
+            _err = try_restore_uploaded_session(_main_resume)
+            if _err:
+                st.error(_err)
+            else:
+                st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="ez-health-panel">', unsafe_allow_html=True)
     st.subheader("Event Health")
