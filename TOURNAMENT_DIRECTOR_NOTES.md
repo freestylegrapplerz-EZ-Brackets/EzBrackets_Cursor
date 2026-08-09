@@ -1,7 +1,7 @@
 # Tournament Director Notes — Real Event Review
 
 Notes captured while reviewing a real Smoothcomp CSV.  
-**Status:** Notes 1–4 implemented. Keep adding notes below as bracket work continues.
+**Status:** Notes 1–6 implemented. Keep adding notes below as bracket work continues.
 
 ---
 
@@ -91,6 +91,58 @@ Need an **obvious, easy** way to:
 
 ---
 
+## Note 4 — Youth kids (4–13): prefer same belt before skill changes
+
+**Date captured:** 2026-08-09  
+**Status:** Implemented
+
+### Bad recommendation found in real event
+- Athlete: **Adalynn** (Black Tie Brazilian Jiu Jitsu)
+- **Current:** `Kids & Teens Gi / White / Youth (8 - 9yrs) / 60 - 69.9 lbs`
+- **Suggested:** `Kids & Teens Gi / Grey / Youth (8 - 9yrs) / 60 - 69.9 lbs`
+- Scored like a near-perfect match (~99) with same age/weight — but directors avoid belt changes for young kids when possible.
+
+### Director rule
+For **Youth / kids about 4–13** (especially **White belt**):
+
+1. Same skill + same age + **same weight**
+2. Same skill + same age + **±10 lbs**
+3. Same skill + same age + **±20 lbs**
+4. Only then consider a **different skill** (e.g. White → Grey) → treat as **Needs Review**
+5. Among cross-skill options for White Youth: prefer **~10 lb weight advantage** into the higher belt, then **same weight**, then heavier
+
+### Implementation
+- Detect Youth/kids ages with midpoint under 14
+- Apply a Youth same-belt priority penalty on any skill/belt change so same-belt ±20 outranks White→Grey
+- Soft weight advantage ordering for White Youth moving into a higher belt
+- Cross-skill remains available later; trust UI marks skill gaps as Needs Review
+
+---
+
+## Note 5 — False “Same academy” / Teen vs Junior Teen labels
+
+**Date captured:** 2026-08-09  
+**Status:** Implemented
+
+### Bad recommendation found in real event
+- **Current:** `Kids & Teens No-Gi / Intermediate / Teen (female) (14 -15yrs) / 110 - 119.9 lbs.`
+- **Suggested:** `Kids & Teens No-Gi / Intermediate / Junior Teen (male/female) (12 - 13yrs) / 120 - 129.9 lbs.`
+- UI claimed **Same academy**, but Smoothcomp showed **different academies**.
+
+### Root causes addressed
+1. **Approved-only academy view:** pending athletes from other academies were ignored, so a division looked same-academy when it wasn’t.
+2. **Missing academy data** was treated as same-academy (only the moving athlete’s academy counted).
+3. **`(male/female)`** labels were misread as female; gendered Teen 14–15 must not merge into open mixed Junior Teen.
+4. Age compare now uses **year bands** (14–15 vs 12–13) so those are never “Same age.”
+
+### Implementation
+- Academy mix uses **all registrations** in the division, not only Approved
+- Unknown academy data → “Unknown academy data” (never false “Same academy”)
+- Explicit mixed gender labels blocked against gendered 14+ divisions
+- Safer academy field delimiter (` || `) so academy names may contain commas
+
+---
+
 ## Additional notes
 
-_(Add Note 4, etc. below as the event review continues.)_
+_(Add Note 6, etc. below as the event review continues.)

@@ -9,8 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.2
-# Youth same-skill priority (kids 4–13) + prior event rules / Save-Resume
+# EZ BRACKETS - v1.2.1
+# Fix false same-academy, Smoothcomp Club vs Team, Teen gender/age labels
 # =========================
 
 st.set_page_config(
@@ -559,18 +559,90 @@ def find_col(df, possible_names):
     return None
 
 
+def normalize_academy_name(name):
+    a = str(name or "").strip()
+    if not a:
+        return ""
+    if a.lower() in {"nan", "none", "null", "n/a", "na", "-", "--", "unknown"}:
+        return ""
+    return a
+
+
+def resolve_athlete_names(df):
+    """Build athlete display names from Smoothcomp Firstname/Lastname when present."""
+    first_col = find_col(df, ["firstname", "first name"])
+    last_col = find_col(df, ["lastname", "last name"])
+    if first_col and last_col:
+        first = df[first_col].fillna("").astype(str).map(lambda x: x.strip() if str(x).lower() != "nan" else "")
+        last = df[last_col].fillna("").astype(str).map(lambda x: x.strip() if str(x).lower() != "nan" else "")
+        full = (first + " " + last).str.strip()
+        if full.str.len().gt(0).any():
+            return full.where(full.str.len().gt(0), df.index.astype(str))
+
+    # Avoid bare "name" first — it substring-matches Firstname/Middle name.
+    name_col = find_col(df, ["full name", "athlete", "competitor", "name"])
+    if name_col:
+        return df[name_col].fillna("").astype(str).str.strip().replace({"nan": ""})
+    return pd.Series(df.index.astype(str), index=df.index)
+
+
+def resolve_academy_series(df):
+    """Resolve academy/club for Smoothcomp CSVs that include both Club and Team.
+
+    Smoothcomp: **Club** is the academy (usually filled). **Team** is optional and
+    often sparse. Preferring Team first left most athletes with blank academies,
+    which falsely crushed same-skill Adult weight moves under same-academy penalties.
+    """
+    club_col = find_col(df, ["club", "academy", "affiliation", "school"])
+    team_col = find_col(df, ["team"])
+
+    def _clean_col(col):
+        if col is None:
+            return pd.Series([""] * len(df), index=df.index)
+        return df[col].map(normalize_academy_name)
+
+    club = _clean_col(club_col)
+    team = _clean_col(team_col)
+    # Prefer Club/academy; fill gaps from Team.
+    if club_col is not None and team_col is not None and club_col != team_col:
+        return club.where(club.astype(str).str.len().gt(0), team)
+    if club_col is not None:
+        return club
+    return team
+
+
+def is_explicitly_mixed_gender_label(text):
+    """True for open/mixed labels like (male/female), male & female, co-ed."""
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    compact = re.sub(r"[\s_\-]+", "", raw)
+    if "malefemale" in compact or "femalemale" in compact:
+        return True
+    if re.search(r"\bmale\s*/\s*female\b|\bfemale\s*/\s*male\b", raw):
+        return True
+    if re.search(r"\b(co[- ]?ed|mixed\s*gender)\b", raw):
+        return True
+    return False
+
+
 def extract_gender(text):
     """Return 'male', 'female', or '' from division/entry labels.
 
     Supports slash tokens (Male/Female) and entry prefixes (Men No-Gi, Women Gi).
     Checks female markers before male so 'women' is not misread as 'men'.
+    Explicit mixed labels (male/female) return '' (unknown / open).
     """
     raw = str(text or "").strip().lower()
     if not raw:
         return ""
+    if is_explicitly_mixed_gender_label(raw):
+        return ""
     # Exact slash/segment tokens first
     for part in re.split(r"[/]", raw):
         token = part.strip().lower()
+        if is_explicitly_mixed_gender_label(token):
+            return ""
         if token in FEMALE_GENDER_TOKENS:
             return "female"
         if token in MALE_GENDER_TOKENS:
@@ -607,10 +679,28 @@ def age_requires_gender_separation(age_label):
     return False
 
 
-def genders_compatible(single_gender, single_age, cand_gender, cand_age):
-    """Hard gender gate. Younger youth may mix; 14+ / Teen+ may not."""
-    if not age_requires_gender_separation(single_age) and not age_requires_gender_separation(cand_age):
+def genders_compatible(
+    single_gender,
+    single_age,
+    cand_gender,
+    cand_age,
+    single_label="",
+    cand_label="",
+):
+    """Hard gender gate. Younger youth may mix; 14+ / Teen+ may not.
+
+    Also blocks moving a gendered 14+ athlete into an explicitly mixed
+    (male/female) division, and the reverse.
+    """
+    needs_sep = age_requires_gender_separation(single_age) or age_requires_gender_separation(cand_age)
+    if not needs_sep:
         return True
+    src_mixed = is_explicitly_mixed_gender_label(single_label) or is_explicitly_mixed_gender_label(single_age)
+    tgt_mixed = is_explicitly_mixed_gender_label(cand_label) or is_explicitly_mixed_gender_label(cand_age)
+    if single_gender and tgt_mixed:
+        return False
+    if cand_gender and src_mixed:
+        return False
     if single_gender and cand_gender and single_gender != cand_gender:
         return False
     return True
@@ -659,9 +749,33 @@ def skill_value(skill):
     return 999
 
 
+def age_year_midpoint(age):
+    """Return midpoint of explicit year bands (e.g. 14-15 → 14.5), else None."""
+    nums = [int(n) for n in re.findall(r"\d+", str(age or ""))]
+    if not nums:
+        return None
+    # Ignore non-age numbers that sometimes appear in labels (rare).
+    age_nums = [n for n in nums if 3 <= n <= 75]
+    if not age_nums:
+        return None
+    if len(age_nums) >= 2:
+        return sum(age_nums[:2]) / 2.0
+    return float(age_nums[0])
+
+
 def age_value(age):
-    """Return a sortable age rank. Longer label matches win (Youth 8-9 > Youth)."""
-    a = str(age)
+    """Return a sortable age rank. Longer label matches win (Youth 8-9 > Youth).
+
+    When an explicit year band is present (12-13, 14-15, etc.), use that
+    midpoint so Teen 14-15 is never treated as the same age as Junior Teen 12-13.
+    """
+    a = str(age or "").strip()
+    if not a:
+        return 999
+    year_mid = age_year_midpoint(a)
+    # Prefer year bands for kids/teens when present.
+    if year_mid is not None and year_mid <= 17:
+        return year_mid
     a_low = a.lower()
     matches = [(key, value) for key, value in AGE_ORDER_HINTS if key.lower() in a_low]
     if matches:
@@ -669,13 +783,34 @@ def age_value(age):
         best_key, best_val = matches[0]
         # Generic "Youth" with numbers but no explicit band → use age midpoints.
         if best_key.lower() == "youth":
-            nums = [int(n) for n in re.findall(r"\d+", a)]
-            if nums:
-                mid = sum(nums) / len(nums)
-                return 3 + mid / 10.0  # Youth 8-9 → 3.85, Youth 10-11 → 4.05
+            if year_mid is not None:
+                return year_mid
         return best_val
-    nums = re.findall(r"\d+", a)
-    return int(nums[0]) if nums else 999
+    if year_mid is not None:
+        return year_mid
+    return 999
+
+
+def age_step_difference(src_age, tgt_age):
+    """Return age gap in practical steps, or 999 if unknown.
+
+    Important: unknown vs unknown must NOT count as the same age (0).
+    """
+    sv = age_value(src_age)
+    tv = age_value(tgt_age)
+    if sv == 999 or tv == 999:
+        return 999
+    gap = abs(sv - tv)
+    # Year-based ranks (e.g. 12.5 vs 14.5) → map to age-group steps.
+    if gap <= 0.01:
+        return 0
+    if gap <= 2.25:
+        return 1
+    if gap <= 4.5:
+        return 2
+    if gap <= 7:
+        return 3
+    return max(4, int(round(gap / 2.0)))
 
 
 def weight_mid(weight):
@@ -705,17 +840,15 @@ def normalize_dataframe(raw_df):
     df = raw_df.copy()
 
     group_col = find_col(df, ["group", "division", "bracket", "category"])
-    name_col = find_col(df, ["name", "athlete", "competitor", "full name"])
     approved_col = find_col(df, ["approved", "status"])
-    academy_col = find_col(df, ["academy", "affiliation", "team", "club", "school"])
 
     if group_col is None:
         st.error("Could not find a division/group column in this CSV.")
         st.stop()
 
-    df["athlete_name"] = df[name_col].astype(str).str.strip() if name_col else df.index.astype(str)
+    df["athlete_name"] = resolve_athlete_names(df)
     df["approved_clean"] = df[approved_col].astype(str).str.strip() if approved_col else "Approved"
-    df["academy_clean"] = df[academy_col].astype(str).str.strip() if academy_col else ""
+    df["academy_clean"] = resolve_academy_series(df)
     df["group_clean"] = df[group_col].astype(str).str.strip()
 
     parsed = df["group_clean"].apply(parse_group)
@@ -740,7 +873,7 @@ def normalize_mapped_dataframe(raw_df, mapping):
     df["athlete_name"] = mapped_series("name", "").replace("", pd.NA)
     df["athlete_name"] = df["athlete_name"].fillna(pd.Series(df.index.astype(str), index=df.index))
     df["approved_clean"] = mapped_series("status", "Approved")
-    df["academy_clean"] = mapped_series("academy", "")
+    df["academy_clean"] = mapped_series("academy", "").map(normalize_academy_name)
     df["entry_clean"] = mapped_series("entry", "")
     df["skill_clean"] = mapped_series("skill", "")
     df["age_clean"] = mapped_series("age", "")
@@ -770,24 +903,57 @@ def normalize_mapped_dataframe(raw_df, mapping):
     return df
 
 
+ACADEMY_FIELD_JOIN = " || "
+
+
+def split_academies_field(target_academies):
+    """Split a group_summary academies field into individual academy names.
+
+    Uses ' || ' as the canonical delimiter so academy names may contain commas.
+    Falls back to comma-split only for legacy saved strings without ' || '.
+    """
+    s = str(target_academies or "").strip()
+    if not s or s.lower() in {"nan", "none", "null"}:
+        return []
+    if ACADEMY_FIELD_JOIN in s:
+        parts = s.split(ACADEMY_FIELD_JOIN)
+    elif " + " in s and "," not in s:
+        # Display-style mix strings occasionally flow back in
+        parts = s.split(" + ")
+    else:
+        # Legacy comma join — ambiguous when names contain commas
+        parts = s.split(",")
+    return [p for p in (normalize_academy_name(x) for x in parts) if p]
+
+
 def group_summary(df):
     rows = []
     for group, g in df.groupby("group_clean", dropna=False):
         sample = g.iloc[0]
-        academies = sorted(set([a for a in g["academy_clean"].dropna().astype(str).tolist() if a.strip()]))
+        academies = sorted(set(
+            a for a in (normalize_academy_name(x) for x in g["academy_clean"].tolist()) if a
+        ))
         gender = str(sample.get("gender_clean", "") or "").strip()
         if not gender:
             gender = extract_gender(group) or extract_gender(sample.get("entry_clean", ""))
+        # Recover age/skill/weight from the full group path when cleaned fields are blank.
+        parsed_entry, parsed_skill, parsed_age, parsed_weight, parsed_gender = parse_group(group)
+        age = str(sample.get("age_clean", "") or "").strip() or parsed_age
+        skill = str(sample.get("skill_clean", "") or "").strip() or parsed_skill
+        weight = str(sample.get("weight_clean", "") or "").strip() or parsed_weight
+        entry = str(sample.get("entry_clean", "") or "").strip() or parsed_entry
+        if not gender:
+            gender = parsed_gender
         rows.append({
             "group": group,
             "athletes": len(g),
-            "entry": sample.get("entry_clean", ""),
-            "skill": sample.get("skill_clean", ""),
-            "age": sample.get("age_clean", ""),
-            "weight": sample.get("weight_clean", ""),
+            "entry": entry,
+            "skill": skill,
+            "age": age,
+            "weight": weight,
             "gender": gender,
             "names": ", ".join(g["athlete_name"].astype(str).tolist()),
-            "academies": ", ".join(academies),
+            "academies": ACADEMY_FIELD_JOIN.join(academies),
             "academy_count": len(academies),
         })
     return pd.DataFrame(rows).sort_values(["athletes", "group"]).reset_index(drop=True)
@@ -797,14 +963,42 @@ def same_entry(a, b):
     return normalize_entry_type(a) == normalize_entry_type(b)
 
 
-def academy_mix_after_move(single_academy, target_academies):
-    academies = []
-    if str(target_academies).strip():
-        academies += [a.strip() for a in str(target_academies).split(",") if a.strip()]
-    if str(single_academy).strip():
-        academies.append(str(single_academy).strip())
-    unique = sorted(set([a for a in academies if a]))
-    return " + ".join(unique), len(unique)
+def academy_mix_after_move(single_academy, target_academies, target_academy_count=None, target_athletes=None):
+    """Return (mix_label, unique_count, status).
+
+    status:
+      - "mixed": 2+ known academies after move
+      - "same": only one known academy after move (true same-academy risk)
+      - "unknown": target has athletes but no reliable academy data — do NOT
+        claim same-academy (this was a real false-positive in event review)
+    """
+    target_list = split_academies_field(target_academies)
+    single = normalize_academy_name(single_academy)
+    known_target = len(target_list)
+    if target_academy_count is not None:
+        try:
+            known_target = max(known_target, int(target_academy_count))
+        except (TypeError, ValueError):
+            pass
+    try:
+        tgt_n = int(target_athletes) if target_athletes is not None else 0
+    except (TypeError, ValueError):
+        tgt_n = 0
+
+    # Target has people but we don't know their academies → cannot assert same-academy.
+    if known_target == 0 and not target_list and tgt_n >= 1:
+        label = single or "Unknown academy"
+        return label, 0, "unknown"
+
+    academies = list(target_list)
+    if single:
+        academies.append(single)
+    unique = sorted(set(academies))
+    if len(unique) >= 2:
+        return " + ".join(unique), len(unique), "mixed"
+    if len(unique) == 1:
+        return unique[0], 1, "same"
+    return "Unknown academy", 0, "unknown"
 
 
 DEFAULT_SCORING_SETTINGS = {
@@ -967,23 +1161,46 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
         or extract_gender(cand.get("group", ""))
         or extract_gender(cand.get("entry", ""))
     )
+    src_skill = str(single.get("skill_clean", "") or "").strip()
+    tgt_skill = str(cand.get("skill", "") or "").strip()
+    src_age = str(single.get("age_clean", "") or "").strip()
+    tgt_age = str(cand.get("age", "") or "").strip()
+    src_weight = str(single.get("weight_clean", "") or "").strip()
+    tgt_weight = str(cand.get("weight", "") or "").strip()
+
+    # Recover fields from full division paths when cleaned columns are blank.
+    if (not src_age or not src_skill or not src_weight) and single.get("group_clean"):
+        pe, ps, pa, pw, _pg = parse_group(single.get("group_clean", ""))
+        src_skill = src_skill or ps
+        src_age = src_age or pa
+        src_weight = src_weight or pw
+        if not single_gender:
+            single_gender = _pg or single_gender
+    if (not tgt_age or not tgt_skill or not tgt_weight) and cand.get("group"):
+        pe, ps, pa, pw, _pg = parse_group(cand.get("group", ""))
+        tgt_skill = tgt_skill or ps
+        tgt_age = tgt_age or pa
+        tgt_weight = tgt_weight or pw
+        if not cand_gender:
+            cand_gender = _pg or cand_gender
+
     if not genders_compatible(
         single_gender,
-        single.get("age_clean", ""),
+        src_age,
         cand_gender,
-        cand.get("age", ""),
+        tgt_age,
+        single_label=str(single.get("group_clean", "") or ""),
+        cand_label=str(cand.get("group", "") or ""),
     ):
         return None
 
-    src_skill = single.get("skill_clean", "")
-    tgt_skill = cand.get("skill", "")
-    src_age = single.get("age_clean", "")
-    tgt_age = cand.get("age", "")
     skill_diff = abs(skill_value(src_skill) - skill_value(tgt_skill))
-    raw_age_diff = abs(age_value(src_age) - age_value(tgt_age))
+    if skill_value(src_skill) == 999 and skill_value(tgt_skill) == 999:
+        skill_diff = 999
+    raw_age_diff = age_step_difference(src_age, tgt_age)
 
-    sw = weight_mid(single.get("weight_clean", ""))
-    cw = weight_mid(cand.get("weight", ""))
+    sw = weight_mid(src_weight)
+    cw = weight_mid(tgt_weight)
     weight_diff = abs(sw - cw) if sw is not None and cw is not None else 999
 
     juv_to_adult = is_juvenile_16_17(src_age) and is_adult_age(tgt_age)
@@ -1126,6 +1343,15 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
         reasons.append("Youth skill/belt change — prefer same belt when possible")
         breakdown.append(f"Youth same-belt priority: -{extra}")
 
+    # Adult same-skill priority: Intermediate ±10/±20 should beat Beginner/Advanced
+    # same-weight targets that only win via target-size bonuses (Caleb case).
+    adult_move = is_adult_age(src_age) and is_adult_age(tgt_age)
+    if adult_move and skill_diff >= 1 and skill_diff != 999:
+        extra = 8
+        score -= extra
+        reasons.append("Adult skill/belt change — prefer same skill when possible")
+        breakdown.append(f"Adult same-skill priority: -{extra}")
+
         # White Youth into a higher belt: prefer ~10 lb advantage, then same weight,
         # then heavier (still after all same-belt weight options).
         src_sv = skill_value(src_skill)
@@ -1151,21 +1377,31 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
                 reasons.append("White Youth into heavier higher-belt class")
                 breakdown.append("Youth White→higher belt heavier: -3")
 
-    academy_mix, academy_count = academy_mix_after_move(single.get("academy_clean", ""), cand.get("academies", ""))
+    academy_mix, academy_count, academy_status = academy_mix_after_move(
+        single.get("academy_clean", ""),
+        cand.get("academies", ""),
+        target_academy_count=cand.get("academy_count"),
+        target_athletes=cand.get("athletes"),
+    )
 
     target_size = int(cand.get("athletes", 1))
     academy_warning = ""
-    if academy_count <= 1 and target_size >= 1:
+    if academy_status == "same" and target_size >= 1:
         penalty = settings["same_academy_penalty"]
         score -= penalty
         academy_warning = "All same academy"
         reasons.append("would create/keep all-same-academy bracket")
         breakdown.append(f"All same academy: -{penalty}")
-    elif academy_count >= 2:
+    elif academy_status == "mixed":
         bonus = settings["mixed_academy_bonus"]
         score += bonus
         reasons.append("mixed academy bracket")
         breakdown.append(f"Mixed academy: +{bonus}")
+    elif academy_status == "unknown":
+        # Distinct from "All same academy" so UI never claims a false academy conflict.
+        academy_warning = "Unknown academy data"
+        reasons.append("target academy data missing — verify manually")
+        breakdown.append("Target academy data missing: 0 (not marked same-academy)")
 
     if target_size >= 3:
         bonus = settings["target_size_three_plus_bonus"]
@@ -1184,6 +1420,34 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
     return score, "; ".join(reasons), " | ".join(breakdown), safety_flag, weight_diff, age_diff, skill_diff, academy_warning, academy_mix
 
 
+def _academy_lookup_from_df(df):
+    """Map group → academy fields using ALL registrations (not only approved).
+
+    Approved-only filtering can hide other academies that still exist in the
+    division in Smoothcomp, which previously caused false "Same academy" flags.
+    """
+    if df is None or df.empty:
+        return {}
+    full = group_summary(df)
+    lookup = {}
+    for _, row in full.iterrows():
+        lookup[str(row["group"])] = {
+            "academies": row.get("academies", ""),
+            "academy_count": int(row.get("academy_count", 0) or 0),
+        }
+    return lookup
+
+
+def _cand_with_full_academies(cand, academy_lookup):
+    """Return a candidate Series/dict enriched with full-file academy data."""
+    data = cand.to_dict() if hasattr(cand, "to_dict") else dict(cand)
+    info = academy_lookup.get(str(data.get("group", "")), None)
+    if info:
+        data["academies"] = info["academies"]
+        data["academy_count"] = info["academy_count"]
+    return data
+
+
 def make_recommendations(
     df,
     only_approved=True,
@@ -1193,6 +1457,7 @@ def make_recommendations(
     scoring_settings=None,
 ):
     working = df.copy()
+    academy_lookup = _academy_lookup_from_df(df)
 
     if only_approved and "approved_clean" in working.columns:
         approved_mask = working["approved_clean"].astype(str).str.lower().eq("approved")
@@ -1211,7 +1476,8 @@ def make_recommendations(
 
         scored = []
         for _, cand in candidates.iterrows():
-            result = score_candidate(single, cand, allow_entry_crossover, scoring_settings)
+            cand_for_score = _cand_with_full_academies(cand, academy_lookup)
+            result = score_candidate(single, cand_for_score, allow_entry_crossover, scoring_settings)
             if result is None:
                 continue
 
@@ -1289,6 +1555,7 @@ def make_academy_conflict_recommendations(
     scoring_settings=None,
 ):
     working = df.copy()
+    academy_lookup = _academy_lookup_from_df(df)
 
     if only_approved and "approved_clean" in working.columns:
         approved_mask = working["approved_clean"].astype(str).str.lower().eq("approved")
@@ -1296,6 +1563,16 @@ def make_academy_conflict_recommendations(
             working = working[approved_mask]
 
     summary = group_summary(working)
+    # Use full-file academy counts so a division isn't flagged as academy-only
+    # just because other academies are still pending approval.
+    if academy_lookup:
+        summary = summary.copy()
+        summary["academies"] = summary["group"].map(
+            lambda g: academy_lookup.get(str(g), {}).get("academies", "")
+        )
+        summary["academy_count"] = summary["group"].map(
+            lambda g: academy_lookup.get(str(g), {}).get("academy_count", 0)
+        )
     conflict_groups = summary[(summary["athletes"] >= 2) & (summary["academy_count"] == 1)].copy()
     target_groups = summary[summary["athletes"] >= min_target_size].copy()
 
@@ -1305,16 +1582,17 @@ def make_academy_conflict_recommendations(
         scored = []
 
         for _, cand in candidates.iterrows():
-            result = score_conflict_candidate(problem, cand, allow_entry_crossover, scoring_settings)
+            cand_for_score = _cand_with_full_academies(cand, academy_lookup)
+            result = score_conflict_candidate(problem, cand_for_score, allow_entry_crossover, scoring_settings)
             if result is None:
                 continue
 
             score, why, breakdown, safety_flag, weight_diff, age_diff, skill_diff, academy_warning, academy_mix = result
-            if int(cand.get("academy_count", 0)) >= 2:
+            if int(cand_for_score.get("academy_count", 0)) >= 2:
                 score = min(100, score + 8)
                 why = why + "; target already has mixed academies"
                 breakdown = breakdown + " | Mixed target bracket: +8"
-            elif int(cand.get("academy_count", 0)) <= 1:
+            elif int(cand_for_score.get("academy_count", 0)) <= 1:
                 score = max(0, score - 10)
                 why = why + "; target is also same-academy or missing academy variety"
                 breakdown = breakdown + " | Target lacks academy variety: -10"
@@ -1620,8 +1898,13 @@ def build_safety_bullets(rec_row):
     else:
         bullets.append(f"⛔ {ad} age groups — exceeds limit")
 
-    if aw:
+    aw_low = aw.lower()
+    if "unknown academy" in aw_low:
+        bullets.append("⚠️ Academy data missing — verify manually")
+    elif "same academy" in aw_low:
         bullets.append("⚠️ Same-academy bracket")
+    elif aw:
+        bullets.append(f"⚠️ {aw}")
     else:
         bullets.append("✅ Mixed academy result")
 
@@ -1656,6 +1939,7 @@ def trust_summary(rec_row):
         text = text.replace("Same age group", "Same age")
         text = text.replace("Mixed academy result", "Mixed academies")
         text = text.replace("Same-academy bracket", "Same academy")
+        text = text.replace("Academy data missing — verify manually", "Academy data missing — verify in Smoothcomp")
         text = text.replace("1 skill level apart", "One skill level apart")
         text = text.replace("1 age group apart", "One age group apart")
         text = text.replace("1 weight class apart", "One weight class apart")
@@ -1669,12 +1953,14 @@ def trust_summary(rec_row):
         }
 
     # One weight class apart can still be Looks Safe; age/skill gaps or academy warnings need review.
+    aw_low = aw.lower()
     needs_review = (
         "review" in quality
         or "last resort" in quality
         or (sd is not None and sd >= 1)
         or (ad is not None and ad >= 1)
-        or bool(aw)
+        or ("same academy" in aw_low)
+        or ("unknown academy" in aw_low)
         or (wd is not None and wd > 10)
     )
     if needs_review:
