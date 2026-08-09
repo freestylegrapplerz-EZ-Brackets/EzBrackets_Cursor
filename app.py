@@ -10,7 +10,7 @@ import streamlit as st
 
 # =========================
 # EZ BRACKETS - v1.2.1
-# Fix false same-academy / mixed-gender labels / year-band ages
+# Fix false same-academy, Smoothcomp Club vs Team, Teen gender/age labels
 # =========================
 
 st.set_page_config(
@@ -559,6 +559,58 @@ def find_col(df, possible_names):
     return None
 
 
+def normalize_academy_name(name):
+    a = str(name or "").strip()
+    if not a:
+        return ""
+    if a.lower() in {"nan", "none", "null", "n/a", "na", "-", "--", "unknown"}:
+        return ""
+    return a
+
+
+def resolve_athlete_names(df):
+    """Build athlete display names from Smoothcomp Firstname/Lastname when present."""
+    first_col = find_col(df, ["firstname", "first name"])
+    last_col = find_col(df, ["lastname", "last name"])
+    if first_col and last_col:
+        first = df[first_col].fillna("").astype(str).map(lambda x: x.strip() if str(x).lower() != "nan" else "")
+        last = df[last_col].fillna("").astype(str).map(lambda x: x.strip() if str(x).lower() != "nan" else "")
+        full = (first + " " + last).str.strip()
+        if full.str.len().gt(0).any():
+            return full.where(full.str.len().gt(0), df.index.astype(str))
+
+    # Avoid bare "name" first — it substring-matches Firstname/Middle name.
+    name_col = find_col(df, ["full name", "athlete", "competitor", "name"])
+    if name_col:
+        return df[name_col].fillna("").astype(str).str.strip().replace({"nan": ""})
+    return pd.Series(df.index.astype(str), index=df.index)
+
+
+def resolve_academy_series(df):
+    """Resolve academy/club for Smoothcomp CSVs that include both Club and Team.
+
+    Smoothcomp: **Club** is the academy (usually filled). **Team** is optional and
+    often sparse. Preferring Team first left most athletes with blank academies,
+    which falsely crushed same-skill Adult weight moves under same-academy penalties.
+    """
+    club_col = find_col(df, ["club", "academy", "affiliation", "school"])
+    team_col = find_col(df, ["team"])
+
+    def _clean_col(col):
+        if col is None:
+            return pd.Series([""] * len(df), index=df.index)
+        return df[col].map(normalize_academy_name)
+
+    club = _clean_col(club_col)
+    team = _clean_col(team_col)
+    # Prefer Club/academy; fill gaps from Team.
+    if club_col is not None and team_col is not None and club_col != team_col:
+        return club.where(club.astype(str).str.len().gt(0), team)
+    if club_col is not None:
+        return club
+    return team
+
+
 def is_explicitly_mixed_gender_label(text):
     """True for open/mixed labels like (male/female), male & female, co-ed."""
     raw = str(text or "").strip().lower()
@@ -788,17 +840,15 @@ def normalize_dataframe(raw_df):
     df = raw_df.copy()
 
     group_col = find_col(df, ["group", "division", "bracket", "category"])
-    name_col = find_col(df, ["name", "athlete", "competitor", "full name"])
     approved_col = find_col(df, ["approved", "status"])
-    academy_col = find_col(df, ["academy", "affiliation", "team", "club", "school"])
 
     if group_col is None:
         st.error("Could not find a division/group column in this CSV.")
         st.stop()
 
-    df["athlete_name"] = df[name_col].astype(str).str.strip() if name_col else df.index.astype(str)
+    df["athlete_name"] = resolve_athlete_names(df)
     df["approved_clean"] = df[approved_col].astype(str).str.strip() if approved_col else "Approved"
-    df["academy_clean"] = df[academy_col].astype(str).str.strip() if academy_col else ""
+    df["academy_clean"] = resolve_academy_series(df)
     df["group_clean"] = df[group_col].astype(str).str.strip()
 
     parsed = df["group_clean"].apply(parse_group)
@@ -823,7 +873,7 @@ def normalize_mapped_dataframe(raw_df, mapping):
     df["athlete_name"] = mapped_series("name", "").replace("", pd.NA)
     df["athlete_name"] = df["athlete_name"].fillna(pd.Series(df.index.astype(str), index=df.index))
     df["approved_clean"] = mapped_series("status", "Approved")
-    df["academy_clean"] = mapped_series("academy", "")
+    df["academy_clean"] = mapped_series("academy", "").map(normalize_academy_name)
     df["entry_clean"] = mapped_series("entry", "")
     df["skill_clean"] = mapped_series("skill", "")
     df["age_clean"] = mapped_series("age", "")
@@ -854,15 +904,6 @@ def normalize_mapped_dataframe(raw_df, mapping):
 
 
 ACADEMY_FIELD_JOIN = " || "
-
-
-def normalize_academy_name(name):
-    a = str(name or "").strip()
-    if not a:
-        return ""
-    if a.lower() in {"nan", "none", "null", "n/a", "na", "-", "--", "unknown"}:
-        return ""
-    return a
 
 
 def split_academies_field(target_academies):
@@ -1301,6 +1342,15 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
         score -= extra
         reasons.append("Youth skill/belt change — prefer same belt when possible")
         breakdown.append(f"Youth same-belt priority: -{extra}")
+
+    # Adult same-skill priority: Intermediate ±10/±20 should beat Beginner/Advanced
+    # same-weight targets that only win via target-size bonuses (Caleb case).
+    adult_move = is_adult_age(src_age) and is_adult_age(tgt_age)
+    if adult_move and skill_diff >= 1 and skill_diff != 999:
+        extra = 8
+        score -= extra
+        reasons.append("Adult skill/belt change — prefer same skill when possible")
+        breakdown.append(f"Adult same-skill priority: -{extra}")
 
         # White Youth into a higher belt: prefer ~10 lb advantage, then same weight,
         # then heavier (still after all same-belt weight options).
