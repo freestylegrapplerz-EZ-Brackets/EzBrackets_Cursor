@@ -9,8 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.2.2
-# Fix Juvenile 16-17 label detection for Adult step-up matches
+# EZ BRACKETS - v1.2.3
+# Fix (male/female) path parsing + prefer reviewable recs over Do Not Match
 # =========================
 
 st.set_page_config(
@@ -706,6 +706,36 @@ def genders_compatible(
     return True
 
 
+def split_group_path(group):
+    """Split a Smoothcomp group path on '/' but NOT inside parentheses.
+
+    Critical for labels like ``Youth (male/female) (8 - 9yrs)`` — a naive
+    ``.split('/')`` turns that into ``Youth (male`` + ``female) (8 - 9yrs)``
+    and corrupts age/gender parsing.
+    """
+    parts = []
+    buf = []
+    depth = 0
+    for ch in str(group or ""):
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif ch == "/" and depth == 0:
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+        else:
+            buf.append(ch)
+    part = "".join(buf).strip()
+    if part:
+        parts.append(part)
+    return parts
+
+
 def parse_group(group):
     """Split a Smoothcomp-style group into entry/skill/age/weight/gender.
 
@@ -714,7 +744,7 @@ def parse_group(group):
     gender is returned separately for compatibility checks.
     """
     gender = extract_gender(group)
-    parts = [p.strip() for p in str(group).split("/") if str(p).strip()]
+    parts = split_group_path(group)
     parts = [p for p in parts if p.lower() not in GENDER_TOKENS]
 
     entry = parts[0] if len(parts) > 0 else ""
@@ -737,8 +767,21 @@ def parse_group(group):
     # Entry prefixes like "Men No-Gi" still carry gender even after slash stripping.
     if not gender:
         gender = extract_gender(entry)
+    if not gender:
+        gender = extract_gender(age)
 
     return entry, skill, age, weight, gender
+
+
+def rank_scored_candidates(scored):
+    """Prefer reviewable options over equal-score Do Not Match rows."""
+    return sorted(
+        scored,
+        key=lambda x: (
+            1 if str(x.get("Safety Flag", "")).strip() else 0,
+            -int(x.get("Match Score", 0) or 0),
+        ),
+    )
 
 
 def skill_value(skill):
@@ -1525,7 +1568,7 @@ def make_recommendations(
                 "Suggested Weight": cand.get("weight", ""),
             })
 
-        scored = sorted(scored, key=lambda x: x["Match Score"], reverse=True)[:top_n]
+        scored = rank_scored_candidates(scored)[:top_n]
 
         for rank, row in enumerate(scored, start=1):
             row["Rank"] = rank
@@ -1642,7 +1685,7 @@ def make_academy_conflict_recommendations(
                 "Suggested Weight": cand.get("weight", ""),
             })
 
-        scored = sorted(scored, key=lambda x: x["Match Score"], reverse=True)[:top_n]
+        scored = rank_scored_candidates(scored)[:top_n]
 
         for rank, row in enumerate(scored, start=1):
             row["Rank"] = rank
