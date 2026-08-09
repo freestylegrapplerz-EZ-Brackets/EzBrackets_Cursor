@@ -1,7 +1,7 @@
 # Tournament Director Notes — Real Event Review
 
 Notes captured while reviewing a real Smoothcomp CSV.  
-**Status:** Notes 1–6 implemented. Keep adding notes below as bracket work continues.
+**Status:** Notes 1–7 implemented. Keep adding notes below as bracket work continues.
 
 ---
 
@@ -143,6 +143,41 @@ For **Youth / kids about 4–13** (especially **White belt**):
 
 ---
 
+## Note 6 — Caleb: Adult Intermediate weight moves lost to Master / wrong Club column
+
+**Date captured:** 2026-08-09  
+**Status:** Implemented  
+**CSV:** `registrations-2026-08-09-14_34_20_261a.csv`
+
+### Bad recommendation found in real event
+- Athlete: **Caleb Watson** — `Men No-Gi / Intermediate / Adult / 170 - 179.9 lbs.`
+- App suggested: `Men No-Gi / Beginner / Master 1 / 180 - 189.9 lbs.`
+- Manual check: Intermediate Adult **160–169** and **180–189** both exist and should be preferred.
+
+### Root cause / fix
+Prefer Smoothcomp **Club** over sparse **Team**; Adult same-skill priority for ±10/±20 weight moves.
+
+---
+
+## Note 7 — Aiden Lee: Juvenile 16–17 → Adult marked Do Not Match
+
+**Date captured:** 2026-08-09  
+**Status:** Implemented
+
+### Bad recommendation found in real event
+- Athlete: **Aiden Lee** — `Juvenile No-Gi (male) / Intermediate / 16 - 17 years old / 160 - 169.9 lbs.`
+- Manual good option: `Men No-Gi / Intermediate / Adult / 160 - 169.9 lbs.`
+- App listed it #1 but as **Do Not Match** (“no safe matches”) because of age gap.
+
+### Root cause
+Smoothcomp puts Juvenile in the entry/group prefix and only `16 - 17 years old` in the age slot. The Juvenile→Adult rule only looked at the age field for the word “Juvenile”, so it never applied; age was treated as a 2-group jump and hard-blocked.
+
+### Implementation
+- Detect Juvenile 16–17 from age year bands (`16 - 17 years old`) and/or Juvenile in the full group path
+- Then Adult same-skill/same-weight is a normal step-up (not Do Not Match)
+
+---
+
 ## Additional notes
 
-_(Add Note 6, etc. below as the event review continues.)
+_(Add Note 8, etc. below as the event review continues.)
