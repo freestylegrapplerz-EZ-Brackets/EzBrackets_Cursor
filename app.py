@@ -9,8 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.1
-# Event rules (gender hard-exclude, Juvenile→Adult) + Save/Resume Progress
+# EZ BRACKETS - v1.2
+# Youth same-skill priority (kids 4–13) + prior event rules / Save-Resume
 # =========================
 
 st.set_page_config(
@@ -921,6 +921,35 @@ def is_adult_age(age_label):
     return "adult" in a and "master" not in a and "pre" not in a
 
 
+def age_midpoint_years(age_label):
+    nums = [int(n) for n in re.findall(r"\d+", str(age_label or ""))]
+    if not nums:
+        return None
+    return sum(nums) / len(nums)
+
+
+def is_youth_kids_age(age_label):
+    """Youth / kids roughly ages 4–13 (not 14+, Juvenile, Adult, Masters)."""
+    a = str(age_label or "").lower().strip()
+    if not a:
+        return False
+    if any(k in a for k in ("juvenile", "adult", "master", "senior")):
+        return False
+    mid = age_midpoint_years(a)
+    if "youth" in a or "kid" in a or "child" in a:
+        if mid is not None:
+            return mid < 14
+        return True
+    # Numeric kid bands without the word Youth (e.g. "8 - 9yrs")
+    if mid is not None and 4 <= mid < 14:
+        return True
+    return False
+
+
+def is_white_belt_skill(skill):
+    return "white" in str(skill or "").lower()
+
+
 def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=None):
     settings = {**DEFAULT_SCORING_SETTINGS, **(scoring_settings or {})}
 
@@ -1086,6 +1115,41 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
                 score -= 2
                 reasons.append("Adult target is 1 weight class heavier")
                 breakdown.append("Juvenile→Adult heavier target: -2")
+
+    # Director preference (Youth / kids ~4–13): keep same belt/skill whenever possible.
+    # Same-belt ±10 / ±20 should outrank a belt change (e.g. White → Grey).
+    # Cross-skill remains available as a later Needs Review option.
+    youth_kids_move = is_youth_kids_age(src_age) and is_youth_kids_age(tgt_age)
+    if youth_kids_move and skill_diff >= 1 and skill_diff != 999:
+        extra = 18
+        score -= extra
+        reasons.append("Youth skill/belt change — prefer same belt when possible")
+        breakdown.append(f"Youth same-belt priority: -{extra}")
+
+        # White Youth into a higher belt: prefer ~10 lb advantage, then same weight,
+        # then heavier (still after all same-belt weight options).
+        src_sv = skill_value(src_skill)
+        tgt_sv = skill_value(tgt_skill)
+        if (
+            is_white_belt_skill(src_skill)
+            and src_sv != 999
+            and tgt_sv != 999
+            and tgt_sv > src_sv
+            and sw is not None
+            and cw is not None
+        ):
+            if 0 < (sw - cw) <= 10:
+                if weight_diff <= 10:
+                    soften = settings["adjacent_class_penalty"]
+                    score += soften
+                    breakdown.append(f"Youth White→higher belt lighter-class soften: +{soften}")
+                score += 2
+                reasons.append("White Youth gets ~10 lb advantage into higher belt")
+                breakdown.append("Youth White→higher belt weight advantage: +2")
+            elif 0 < (cw - sw) <= 10:
+                score -= 3
+                reasons.append("White Youth into heavier higher-belt class")
+                breakdown.append("Youth White→higher belt heavier: -3")
 
     academy_mix, academy_count = academy_mix_after_move(single.get("academy_clean", ""), cand.get("academies", ""))
 

@@ -1,7 +1,7 @@
 # Tournament Director Notes — Real Event Review
 
 Notes captured while reviewing a real Smoothcomp CSV.  
-**Status:** Notes 1–3 implemented in the Event Rules + Save/Resume update. Keep adding notes below as bracket work continues.
+**Status:** Notes 1–4 implemented. Keep adding notes below as bracket work continues.
 
 ---
 
