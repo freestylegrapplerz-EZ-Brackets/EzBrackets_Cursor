@@ -1,7 +1,7 @@
 # Tournament Director Notes — Real Event Review
 
 Notes captured while reviewing a real Smoothcomp CSV.  
-**Status:** Notes 1–8 implemented. Keep adding notes below as bracket work continues.
+**Status:** Notes 1–9 implemented. Keep adding notes below as bracket work continues.
 
 ---
 
@@ -178,6 +178,35 @@ Smoothcomp puts Juvenile in the entry/group prefix and only `16 - 17 years old` 
 
 ---
 
+## Note 8 — Youth (male/female) path parse + Do Not Match ranking above real options
+
+**Date captured:** 2026-08-09  
+**Status:** Implemented (PR #12)
+
+### Summary
+Fixed `(male/female)` splitting group paths and stopped equal-score Do Not Match rows from ranking above reviewable nearby options.
+
+---
+
+## Note 9 — Planned-state singles: accepting A→B should clear both alone divisions
+
+**Date captured:** 2026-08-13  
+**Status:** Implemented
+
+### Workflow issue
+Accepting a move from Single A into Single B’s division left Athlete B in the unresolved queue / Event Health alone count, even though the planned bracket was already 2 athletes.
+
+### Implementation
+- Keep original CSV state unchanged
+- Derive **planned athlete counts** from CSV + Active accepted moves
+- Unresolved singles / Focus / Queue / Event Health Alone use planned counts
+- Destination singles with planned size ≥ 2 drop out of the queue
+- Revert restores both singles
+- Action Plan still lists only the accepted move (no invented move for B)
+- Scoring / recommendation rankings unchanged
+
+---
+
 ## Additional notes
 
-_(Add Note 8, etc. below as the event review continues.)
+_(Add Note 10, etc. below as the event review continues.)
