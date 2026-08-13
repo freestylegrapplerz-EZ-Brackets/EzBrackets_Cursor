@@ -9,8 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.2.4
-# Planned-state singles: accepted moves resolve source + destination alone divisions
+# EZ BRACKETS - v1.2.5
+# Treat Juvenile/Men/Kids Gi as the same entry type for Adult step-ups
 # =========================
 
 st.set_page_config(
@@ -869,12 +869,18 @@ def weight_mid(weight):
 
 
 def normalize_entry_type(entry):
-    """Normalize Gi / No-Gi spellings so Nogi/NOGI/No Gi all count as no-gi."""
+    """Normalize Gi / No-Gi spellings across Smoothcomp entry prefixes.
+
+    ``Juvenile Gi``, ``Men Gi``, ``Kids & Teens Gi``, and bare ``Gi`` must all
+    count as the same entry type — otherwise Juvenile Gi 16–17 can never see
+    Adult Men Gi divisions (hard-excluded before scoring).
+    """
     raw = str(entry).strip().lower()
     compact = re.sub(r"[\s_\-]+", "", raw)
     if "nogi" in compact:
         return "no-gi"
-    if compact == "gi" or re.match(r"^gi\b", raw):
+    # Word-boundary gi so "Juvenile Gi (male)" / "Men Gi" match, but not random text.
+    if compact == "gi" or re.search(r"\bgi\b", raw):
         return "gi"
     return raw
 
