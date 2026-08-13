@@ -207,6 +207,25 @@ Accepting a move from Single A into Single B’s division left Athlete B in the 
 
 ---
 
+## Note 10 — Aiden Lee Gi Blue: Adult Gi never considered (entry mismatch)
+
+**Date captured:** 2026-08-13  
+**Status:** Implemented
+
+### Issue
+`Juvenile Gi (male) / Blue / Juvenile (16 - 17yrs) / 160 - 169.9 lbs.` showed **No safe match**, even when Adult Gi divisions may exist.
+
+### Root cause
+`normalize_entry_type()` only treated bare `Gi` / leading `gi` as gi.  
+`Juvenile Gi` and `Men Gi` stayed as different strings → hard-excluded before scoring (same bug class as No-Gi already handled via `nogi` substring).
+
+### Implementation
+- Normalize any entry containing word-boundary `gi` (and not no-gi) to `"gi"`
+- Juvenile Gi 16–17 → Men Gi / Blue / Adult same weight becomes a normal step-up
+- Blue → Adult Intermediate/Beginner still skill-flags (belt vs experience ladder) — expected
+
+---
+
 ## Additional notes
 
-_(Add Note 10, etc. below as the event review continues.)
+_(Add Note 11, etc. below as the event review continues.)
