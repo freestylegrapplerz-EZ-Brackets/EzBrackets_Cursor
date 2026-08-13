@@ -9,8 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.2.3
-# Fix (male/female) path parsing + prefer reviewable recs over Do Not Match
+# EZ BRACKETS - v1.2.4
+# Planned-state singles: accepted moves resolve source + destination alone divisions
 # =========================
 
 st.set_page_config(
@@ -2065,6 +2065,48 @@ def normalize_id_set(values):
     return out
 
 
+def active_moves_only(moves):
+    """Return Active (non-reverted) moves."""
+    return [m for m in (moves or []) if m.get("status") == "Active"]
+
+
+def planned_athlete_counts(summary_df, moves):
+    """Project division sizes after Active moves (CSV unchanged).
+
+    Each Active move removes one athlete from ``original_division`` and adds one
+    to ``new_division``. Used so accepting A→B (two singles) clears both from
+    the unresolved single queue without inventing a second Action Plan row.
+    """
+    counts = {}
+    if summary_df is not None and not summary_df.empty:
+        for _, row in summary_df.iterrows():
+            counts[str(row["group"])] = int(row["athletes"])
+    for m in active_moves_only(moves):
+        src = str(m.get("original_division", "") or "").strip()
+        dst = str(m.get("new_division", "") or "").strip()
+        if src:
+            counts[src] = max(0, int(counts.get(src, 0)) - 1)
+        if dst:
+            counts[dst] = int(counts.get(dst, 0)) + 1
+    return counts
+
+
+def filter_planned_singles(singles_df, planned_counts):
+    """Keep only divisions that are still alone after planned moves."""
+    if singles_df is None or singles_df.empty:
+        return singles_df
+    mask = singles_df["group"].astype(str).map(lambda g: int(planned_counts.get(g, 0)) == 1)
+    return singles_df.loc[mask].copy()
+
+
+def filter_planned_conflict_groups(conflict_df, planned_counts):
+    """Drop academy-conflict groups that no longer have 2+ planned athletes."""
+    if conflict_df is None or conflict_df.empty:
+        return conflict_df
+    mask = conflict_df["group"].astype(str).map(lambda g: int(planned_counts.get(g, 0)) >= 2)
+    return conflict_df.loc[mask].copy()
+
+
 def build_decision_queue(
     singles_df,
     academy_conflict_groups_df,
@@ -2075,7 +2117,11 @@ def build_decision_queue(
     manual_ids,
     pending_impacts,
 ):
-    """Build a stable ordered decision queue for Focus / Queue guided views."""
+    """Build a stable ordered decision queue for Focus / Queue guided views.
+
+    ``singles_df`` / conflict frames should already reflect planned-state
+    filtering (destination singles solved by an accepted inbound move removed).
+    """
     active_divs = {m["original_division"] for m in active_moves if m.get("status") == "Active"}
     skipped_ids = normalize_id_set(skipped_ids)
     manual_ids = normalize_id_set(manual_ids)
@@ -2623,7 +2669,14 @@ if data_ready:
         else:
             st.session_state["move_back_alerts"] = []
 
-    singles = summary[summary["athletes"] == 1].copy()
+    # Original CSV-truth singles / conflicts (uploaded file never modified).
+    csv_singles = summary[summary["athletes"] == 1].copy()
+    csv_academy_conflict_groups = summary[(summary["athletes"] >= 2) & (summary["academy_count"] == 1)].copy()
+
+    # Planned event state = CSV + Active accepted moves (revert drops them back out).
+    _planned_counts = planned_athlete_counts(summary, st.session_state.get("moves", []))
+    singles = filter_planned_singles(csv_singles, _planned_counts)
+    academy_conflict_groups = filter_planned_conflict_groups(csv_academy_conflict_groups, _planned_counts)
 
     recommendations = make_recommendations(
         df,
@@ -2642,26 +2695,41 @@ if data_ready:
         scoring_settings=scoring_settings,
     )
 
-    academy_conflict_groups = summary[(summary["athletes"] >= 2) & (summary["academy_count"] == 1)].copy()
-
-    # Cache stats for compact header (read next render before data_ready is set)
+    # Cache stats for compact header (planned unresolved alone count).
     st.session_state["has_data"] = True
     st.session_state["last_athlete_count"] = len(working_df)
     st.session_state["last_singles_count"] = len(singles)
     st.session_state["last_conflicts_count"] = len(academy_conflict_groups)
     st.session_state["last_preset"] = rule_preset
 
-    # Pending impact for every single division
+    # Pending impact for divisions that are still alone in planned state
     _pending_impacts = {
         row["group"]: get_pending_impact(row["group"], summary, full_summary)
         for _, row in singles.iterrows()
     }
     _may_resolve_count = sum(1 for v in _pending_impacts.values() if v["impact"] == "resolves")
 
-    rank1_recommendations = recommendations[recommendations["Rank"] == 1].copy() if not recommendations.empty else pd.DataFrame()
-    rank1_conflicts = academy_conflict_recommendations[
-        academy_conflict_recommendations["Rank"] == 1
-    ].copy() if not academy_conflict_recommendations.empty else pd.DataFrame()
+    # Action Plan / exports: only Rank-1 for divisions still unresolved in planned state
+    _planned_single_groups = set(singles["group"].astype(str).tolist()) if not singles.empty else set()
+    if recommendations.empty:
+        rank1_recommendations = recommendations.copy()
+    else:
+        rank1_recommendations = recommendations[
+            (recommendations["Rank"] == 1)
+            & (recommendations["Current Division"].astype(str).isin(_planned_single_groups))
+        ].copy()
+    _planned_conflict_groups = (
+        set(academy_conflict_groups["group"].astype(str).tolist())
+        if not academy_conflict_groups.empty
+        else set()
+    )
+    if academy_conflict_recommendations.empty:
+        rank1_conflicts = academy_conflict_recommendations.copy()
+    else:
+        rank1_conflicts = academy_conflict_recommendations[
+            (academy_conflict_recommendations["Rank"] == 1)
+            & (academy_conflict_recommendations["Problem Division"].astype(str).isin(_planned_conflict_groups))
+        ].copy()
     action_plan = build_action_plan(rank1_recommendations, rank1_conflicts)
     high_confidence_count = 0
     do_not_match_count = 0
@@ -2679,7 +2747,11 @@ if data_ready:
     with c2:
         metric_card("Divisions", len(summary), "Active brackets / groups in the file")
     with c3:
-        metric_card("Alone Athletes", len(singles), "Divisions with only 1 athlete — need a partner or a move")
+        metric_card(
+            "Alone Athletes",
+            len(singles),
+            "Still alone after accepted moves (planned state) — need a partner or a move",
+        )
     with c4:
         metric_card("Academy Issues", len(academy_conflict_groups), "Divisions where everyone is from the same academy")
 
@@ -2697,14 +2769,17 @@ if data_ready:
         _pending_impacts,
     )
     _decisions_remaining = len(_queue)
+    # Baseline = original CSV problems; handled includes destination singles auto-resolved by a move.
+    _total_problems = len(csv_singles) + len(csv_academy_conflict_groups)
     _current_problem_ids = (
         {decision_id("single", g) for g in singles["group"].tolist()}
         | {decision_id("conflict", g) for g in academy_conflict_groups["group"].tolist()}
     )
     _manual_count = len(_manual_ids & _current_problem_ids)
     _skipped_count = len([i for i in _queue if i.get("skipped")])
-    _total_problems = len(singles) + len(academy_conflict_groups)
-    _handled = _active_moves_count + _manual_count
+    # Baseline minus queue size: one move A→B can close two CSV singles at once.
+    # Skipped items stay in the queue (still "remaining").
+    _handled = max(0, _total_problems - _decisions_remaining)
     _progress_val = (_handled / _total_problems) if _total_problems > 0 else 0.0
 
     if _decisions_remaining == 0 and _total_problems > 0:
@@ -2776,8 +2851,9 @@ if data_ready:
     st.markdown('<div class="ez-health-panel">', unsafe_allow_html=True)
     st.subheader("Event Health")
     st.caption(
-        "Your checklist for this file. **Moves planned** are decisions you accepted here — "
-        "you still need to apply them in Smoothcomp before publishing brackets."
+        "Your checklist for this file. **Alone** and **Decisions left** use planned state "
+        "(CSV + accepted moves) — moving Single A into Single B clears both. "
+        "**Moves planned** still need to be applied in Smoothcomp before publishing."
     )
     st.progress(
         _progress_val,
@@ -3222,6 +3298,14 @@ if data_ready:
             selected_athlete = st.selectbox("Filter by Athlete", athlete_options)
 
             filtered_recommendations = recommendations.copy()
+            # Hide divisions already solved in planned state (incl. destination singles).
+            if _planned_single_groups:
+                filtered_recommendations = filtered_recommendations[
+                    filtered_recommendations["Current Division"].astype(str).isin(_planned_single_groups)
+                ]
+            else:
+                filtered_recommendations = filtered_recommendations.iloc[0:0].copy()
+
             if selected_athlete != "All Athletes":
                 filtered_recommendations = filtered_recommendations[
                     filtered_recommendations["Athlete"] == selected_athlete
@@ -3233,12 +3317,13 @@ if data_ready:
                     for m in st.session_state["moves"]
                     if m["status"] == "Active"
                 }
-                filtered_recommendations = filtered_recommendations[
-                    ~filtered_recommendations.apply(
-                        lambda r: (r["Athlete"], r["Current Division"]) in _active_move_keys,
-                        axis=1,
-                    )
-                ]
+                if not filtered_recommendations.empty:
+                    filtered_recommendations = filtered_recommendations[
+                        ~filtered_recommendations.apply(
+                            lambda r: (r["Athlete"], r["Current Division"]) in _active_move_keys,
+                            axis=1,
+                        )
+                    ]
 
             best_matches = filtered_recommendations[filtered_recommendations["Rank"] == 1].copy()
 
