@@ -9,8 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.3.1
-# Apply order: Kids/Teens Gi before Kids/Teens No-Gi (not by athlete name)
+# EZ BRACKETS - v1.3.2
+# Apply Mode mirrors Smoothcomp Copy + dropdowns + notes
 # =========================
 
 st.set_page_config(
@@ -2101,6 +2101,26 @@ def format_apply_why(move):
     return " · ".join(bits)
 
 
+DEFAULT_PUBLIC_NOTE = "Moved, alone in division"
+
+
+def smoothcomp_copy_fields(division):
+    """Split a division path into Smoothcomp Copy Registrations dropdown values."""
+    entry, skill, age, weight, _gender = parse_group(division)
+    return {
+        "entry": str(entry or "").strip(),
+        "skill": str(skill or "").strip(),
+        "age": str(age or "").strip(),
+        "weight": str(weight or "").strip(),
+        "full": str(division or "").strip(),
+    }
+
+
+def admin_note_for_move(move):
+    """Admin-note paste: original division (where they still sit after Copy)."""
+    return str(move.get("original_division", "") or "").strip()
+
+
 def normalize_smoothcomp_event_url(url):
     """Return a safe http(s) Smoothcomp event URL, or empty string."""
     raw = str(url or "").strip()
@@ -2113,10 +2133,41 @@ def normalize_smoothcomp_event_url(url):
     return raw
 
 
+def render_smoothcomp_copy_kit(move, *, key_prefix, public_note):
+    """Copy/paste kit matching Smoothcomp: athlete, admin note, 4 dropdowns, public note."""
+    parts = smoothcomp_copy_fields(move.get("new_division", ""))
+    st.caption("Athlete — find, check box, then Copy (not Move)")
+    st.code(move.get("athlete_name", ""), language="")
+
+    st.caption("Admin note — paste original division")
+    st.code(admin_note_for_move(move) or "—", language="")
+
+    st.caption("Copy Registrations dropdowns")
+    _e1, _e2 = st.columns(2)
+    with _e1:
+        st.caption("Entry")
+        st.code(parts["entry"] or "—", language="")
+        st.caption("Age")
+        st.code(parts["age"] or "—", language="")
+    with _e2:
+        st.caption("Skill")
+        st.code(parts["skill"] or "—", language="")
+        st.caption("Weight")
+        st.code(parts["weight"] or "—", language="")
+
+    with st.expander("Full destination path (backup)", expanded=False):
+        st.code(parts["full"] or "—", language="")
+
+    st.caption("Public note — on the new registration")
+    st.code(public_note or DEFAULT_PUBLIC_NOTE, language="")
+
+
 def render_apply_to_smoothcomp(moves, *, expanded=True, key_prefix="apply"):
     """Render Apply Mode: workflow list + compact companion for Smoothcomp.
 
     Does not contact Smoothcomp — copy/paste helper only.
+    Tuned for the director Copy workflow: keep original registration, set
+    Entry/Skill/Age/Weight dropdowns, admin + public notes, then verify.
     """
     migrate_moves_applied_fields(moves)
     stats = apply_mode_stats(moves)
@@ -2130,8 +2181,10 @@ def render_apply_to_smoothcomp(moves, *, expanded=True, key_prefix="apply"):
     st.markdown('<div class="ez-apply-panel">', unsafe_allow_html=True)
     st.subheader("Apply to Smoothcomp")
     st.markdown(
-        "EZ Brackets has **not** updated Smoothcomp. Use this list to apply accepted "
-        "moves there, then mark each one Applied. Save Progress keeps Applied status."
+        "EZ Brackets has **not** updated Smoothcomp. In Smoothcomp use **Copy** "
+        "(not Move) so they stay in the original if someone else signs up.  \n"
+        "Checklist: check athlete → **Copy** → admin note (original) → Entry / Skill / "
+        "Age / Weight → **Copy registrations** → verify + public note → **Mark Applied** here."
     )
 
     _url_col, _open_col = st.columns([4, 1])
@@ -2152,6 +2205,18 @@ def render_apply_to_smoothcomp(moves, *, expanded=True, key_prefix="apply"):
             st.link_button("Open event", _event_url, type="primary")
         else:
             st.caption("Add URL to open")
+
+    if "apply_public_note_template" not in st.session_state:
+        st.session_state["apply_public_note_template"] = DEFAULT_PUBLIC_NOTE
+    st.text_input(
+        "Public note template",
+        key="apply_public_note_template",
+        help="Copied onto each new registration after Copy (athletes/parents can see this).",
+    )
+    _public_note = (
+        str(st.session_state.get("apply_public_note_template", "") or "").strip()
+        or DEFAULT_PUBLIC_NOTE
+    )
 
     _p1, _p2, _p3 = st.columns(3)
     with _p1:
@@ -2179,46 +2244,41 @@ def render_apply_to_smoothcomp(moves, *, expanded=True, key_prefix="apply"):
     st.checkbox(
         "Compact companion (side-by-side with Smoothcomp)",
         key="apply_compact_companion",
-        help="Shows the next unapplied move large — put EZ Brackets beside Smoothcomp.",
+        help="Shows the next unapplied copy large — put EZ Brackets beside Smoothcomp.",
     )
     _compact = bool(st.session_state.get("apply_compact_companion", True))
 
     if not remaining:
-        st.success("All planned moves are marked Applied. Double-check Smoothcomp, then publish.")
+        st.success("All planned copies are marked Applied. Double-check Smoothcomp, then publish.")
     else:
         if _compact:
             _idx, _next = remaining[0]
-            st.markdown("#### Next move")
+            st.markdown("#### Next copy")
             st.markdown(
                 f'<div class="ez-apply-next">'
                 f'<div class="ez-apply-athlete">{_next["athlete_name"]}</div>'
-                f'<p class="ez-apply-path">FROM: {_next["original_division"]}</p>'
-                f'<p class="ez-apply-to">TO: {_next["new_division"]}</p>'
+                f'<p class="ez-apply-path">KEEP / FROM: {_next["original_division"]}</p>'
+                f'<p class="ez-apply-to">COPY INTO: {_next["new_division"]}</p>'
                 f'<p class="ez-apply-why">{format_apply_why(_next)}</p>'
                 f"</div>",
                 unsafe_allow_html=True,
             )
-            _c1, _c2, _c3 = st.columns([2, 2, 1])
-            with _c1:
-                st.caption("Copy athlete")
-                st.code(_next["athlete_name"], language="")
-            with _c2:
-                st.caption("Copy destination")
-                st.code(_next["new_division"], language="")
-            with _c3:
-                st.write("")
-                st.write("")
-                if st.button(
-                    "✅ Mark Applied",
-                    key=f"{key_prefix}_mark_next_{_idx}",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    st.session_state["moves"][_idx]["applied"] = True
-                    st.session_state["moves"][_idx]["applied_at"] = (
-                        datetime.now().strftime("%Y-%m-%d %H:%M")
-                    )
-                    st.rerun()
+            render_smoothcomp_copy_kit(
+                _next,
+                key_prefix=f"{key_prefix}_next_{_idx}",
+                public_note=_public_note,
+            )
+            if st.button(
+                "✅ Mark Applied",
+                key=f"{key_prefix}_mark_next_{_idx}",
+                type="primary",
+                use_container_width=True,
+            ):
+                st.session_state["moves"][_idx]["applied"] = True
+                st.session_state["moves"][_idx]["applied_at"] = (
+                    datetime.now().strftime("%Y-%m-%d %H:%M")
+                )
+                st.rerun()
             st.caption(
                 f"{len(remaining)} remaining · order: Kids/Teens Gi → Kids/Teens No-Gi → Adult Gi → …"
             )
@@ -2233,28 +2293,31 @@ def render_apply_to_smoothcomp(moves, *, expanded=True, key_prefix="apply"):
                 "(finish one entry type before switching)."
             )
             for _mi, (_idx, _m) in enumerate(remaining):
+                _parts = smoothcomp_copy_fields(_m.get("new_division", ""))
                 st.markdown(
                     f"**{_mi + 1}. {_m['athlete_name']}**  \n"
-                    f"FROM: `{_m['original_division']}`  \n"
-                    f"TO: `{_m['new_division']}`  \n"
+                    f"KEEP: `{_m['original_division']}`  \n"
+                    f"COPY INTO: `{_m['new_division']}`  \n"
+                    f"Dropdowns: `{_parts['entry']}` · `{_parts['skill']}` · "
+                    f"`{_parts['age']}` · `{_parts['weight']}`  \n"
                     f"{format_apply_why(_m)}"
                 )
-                _a1, _a2, _a3 = st.columns([2, 2, 1])
-                with _a1:
-                    st.code(_m["athlete_name"], language="")
-                with _a2:
-                    st.code(_m["new_division"], language="")
-                with _a3:
-                    if st.button(
-                        "Mark Applied",
-                        key=f"{key_prefix}_mark_{_idx}",
-                        use_container_width=True,
-                    ):
-                        st.session_state["moves"][_idx]["applied"] = True
-                        st.session_state["moves"][_idx]["applied_at"] = (
-                            datetime.now().strftime("%Y-%m-%d %H:%M")
-                        )
-                        st.rerun()
+                with st.expander("Copy kit", expanded=False):
+                    render_smoothcomp_copy_kit(
+                        _m,
+                        key_prefix=f"{key_prefix}_row_{_idx}",
+                        public_note=_public_note,
+                    )
+                if st.button(
+                    "Mark Applied",
+                    key=f"{key_prefix}_mark_{_idx}",
+                    use_container_width=True,
+                ):
+                    st.session_state["moves"][_idx]["applied"] = True
+                    st.session_state["moves"][_idx]["applied_at"] = (
+                        datetime.now().strftime("%Y-%m-%d %H:%M")
+                    )
+                    st.rerun()
                 st.divider()
 
     if applied_list:
@@ -2613,6 +2676,9 @@ def build_session_payload():
         "focus_index": int(st.session_state.get("focus_index", 0) or 0),
         "csv_hash": st.session_state.get("csv_hash", ""),
         "smoothcomp_event_url": st.session_state.get("smoothcomp_event_url", ""),
+        "apply_public_note_template": st.session_state.get(
+            "apply_public_note_template", DEFAULT_PUBLIC_NOTE
+        ),
         "active_moves": len(active),
         "skipped_count": len(skipped),
         "manual_count": len(manual),
@@ -2632,7 +2698,7 @@ def session_has_progress():
     return False
 
 
-def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash="", manual_review=None, guided_layout="", focus_index=0, smoothcomp_event_url=""):
+def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash="", manual_review=None, guided_layout="", focus_index=0, smoothcomp_event_url="", apply_public_note_template=""):
     """Serialize session state to a JSON-safe dict."""
     migrate_moves_applied_fields(moves)
     return {
@@ -2647,6 +2713,7 @@ def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash="", manua
         "focus_index": int(focus_index or 0),
         "csv_hash": csv_hash or "",
         "smoothcomp_event_url": smoothcomp_event_url or "",
+        "apply_public_note_template": apply_public_note_template or DEFAULT_PUBLIC_NOTE,
     }
 
 
@@ -2676,6 +2743,8 @@ def apply_restored_session(result):
     st.session_state["guided_skipped"] = set(result.get("guided_skipped", []))
     st.session_state["manual_review"] = set(result.get("manual_review", []))
     st.session_state["smoothcomp_event_url"] = str(result.get("smoothcomp_event_url", "") or "")
+    _pub = str(result.get("apply_public_note_template", "") or "").strip()
+    st.session_state["apply_public_note_template"] = _pub or DEFAULT_PUBLIC_NOTE
     saved_preset = result.get("last_preset", "")
     if saved_preset in SCORING_PRESETS:
         st.session_state["rule_preset_select"] = saved_preset
@@ -3321,10 +3390,11 @@ if data_ready:
             st.markdown("**Smoothcomp checklist**")
             st.markdown(
                 "1. Open Smoothcomp (link in Apply Mode)  \n"
-                "2. Copy athlete → paste / search  \n"
-                "3. Copy destination → change category  \n"
-                "4. Mark Applied in EZ Brackets  \n"
-                "5. Publish brackets when Remaining is 0"
+                "2. Check athlete → **Copy** (keep original)  \n"
+                "3. Admin note = original division  \n"
+                "4. Set Entry / Skill / Age / Weight  \n"
+                "5. Copy registrations → verify + public note  \n"
+                "6. Mark Applied when Remaining is 0"
             )
         if _plan_text:
             with st.expander("Copy full Action Plan (backup)", expanded=False):

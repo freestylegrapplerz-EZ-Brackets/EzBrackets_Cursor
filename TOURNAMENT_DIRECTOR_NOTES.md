@@ -1,7 +1,7 @@
 # Tournament Director Notes — Real Event Review
 
 Notes captured while reviewing a real Smoothcomp CSV.  
-**Status:** Notes 1–12 implemented. Keep adding notes below as bracket work continues.
+**Status:** Notes 1–13 implemented. Keep adding notes below as bracket work continues.
 
 ---
 
@@ -266,6 +266,27 @@ Shared workflow order for Focus/Queue and Apply Mode: age cohort → Gi before N
 
 ---
 
+## Note 13 — Smoothcomp Copy workflow (dropdowns + notes)
+
+**Date captured:** 2026-08-18  
+**Status:** Implemented
+
+### Real workflow
+1. Find athlete → check box  
+2. **Copy** (not Move) — keep original if someone else signs up  
+3. Admin note = paste original division  
+4. Copy Registrations modal: Entry → Skill → Age → Weight  
+5. Copy registrations → verify in destination  
+6. Public note e.g. “Moved, alone in division”
+
+### Apply Mode update
+- Split destination into Entry / Skill / Age / Weight copy fields  
+- Ready-to-paste admin note (original) + editable public note template  
+- Checklist wording matches Copy (keep original), not Move  
+- Scoring unchanged
+
+---
+
 ## Additional notes
 
-_(Add Note 13, etc. below as the event review continues.)
+_(Add Note 14, etc. below as the event review continues.)
