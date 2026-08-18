@@ -9,8 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.3.0
-# Apply Mode + compact Smoothcomp companion
+# EZ BRACKETS - v1.3.1
+# Apply order: Kids/Teens Gi before Kids/Teens No-Gi (not by athlete name)
 # =========================
 
 st.set_page_config(
@@ -1983,7 +1983,7 @@ def apply_mode_stats(moves):
 
 
 def entry_workflow_rank(entry):
-    """Gi before No-Gi for Smoothcomp apply order."""
+    """Gi before No-Gi for Smoothcomp apply / review order."""
     norm = normalize_entry_type(entry)
     if norm == "gi":
         return 0
@@ -2004,20 +2004,77 @@ def gender_workflow_rank(gender):
     return 3
 
 
-def workflow_sort_key_for_move(move):
-    """Tournament-sensible apply order: Entry → Age → Gender → Destination → Athlete.
+def apply_age_cohort(age, group_text=""):
+    """Kids/Teens (0) → Adult (1) → Masters (2) for tournament workflow order."""
+    text = f"{age} {group_text}".lower()
+    if "master" in text:
+        return 2
+    av = age_value(age)
+    if isinstance(av, (int, float)) and av <= 17:
+        return 0
+    youth_hints = (
+        "youth", "teen", "juvenile", "mighty mite", "pee wee",
+        "kindergarten", "kids", "pre teen", "junior teen",
+    )
+    if any(h in text for h in youth_hints):
+        return 0
+    if "adult" in text:
+        return 1
+    if isinstance(av, (int, float)) and av < 999:
+        return 1 if av >= 18 else 0
+    return 1
 
-    Uses the destination division so directors can batch athletes landing in
-    nearby brackets. Does not change scoring — display/ops only.
+
+def workflow_sort_key_for_group(group):
+    """Shared bracket order: Kids/Teens Gi → Kids/Teens No-Gi → Adult Gi → …
+
+    Uses the division path the athlete is in now (or the problem division).
+    Does not change scoring — queue/apply display only.
     """
-    dest = str(move.get("new_division", "") or "")
-    entry, _skill, age, _weight, gender = parse_group(dest)
+    group = str(group or "")
+    entry, _skill, age, _weight, gender = parse_group(group)
     return (
+        apply_age_cohort(age, group),
         entry_workflow_rank(entry),
         age_value(age),
         gender_workflow_rank(gender),
+        group.lower(),
+    )
+
+
+def workflow_sort_key_for_move(move):
+    """Apply Mode order from the FROM division so all Gi kids finish before No-Gi.
+
+    Falls back to destination when the source entry type is unknown.
+    """
+    src = str(move.get("original_division", "") or "")
+    dest = str(move.get("new_division", "") or "")
+    key = workflow_sort_key_for_group(src)
+    if key[1] >= 2:
+        dest_key = workflow_sort_key_for_group(dest)
+        if dest_key[1] < 2:
+            key = dest_key
+    return key + (
         dest.lower(),
         str(move.get("athlete_name", "") or "").lower(),
+    )
+
+
+def decision_queue_sort_key(item):
+    """Focus/Queue order: stay on Gi kids/teens before jumping to No-Gi.
+
+    Priority (safer first) applies inside the same cohort + entry bucket so
+    Adam Newman Gi and Adam Newman No-Gi are not adjacent ahead of other Gi kids.
+    """
+    cohort, entry_r, age_r, gender_r, group_l = workflow_sort_key_for_group(item.get("group", ""))
+    return (
+        cohort,
+        entry_r,
+        int(item.get("priority", 9) or 9),
+        age_r,
+        gender_r,
+        group_l,
+        str(item.get("name", "") or "").lower(),
     )
 
 
@@ -2162,14 +2219,19 @@ def render_apply_to_smoothcomp(moves, *, expanded=True, key_prefix="apply"):
                         datetime.now().strftime("%Y-%m-%d %H:%M")
                     )
                     st.rerun()
-            st.caption(f"{len(remaining)} remaining · ordered Gi → No-Gi, younger ages first")
+            st.caption(
+                f"{len(remaining)} remaining · order: Kids/Teens Gi → Kids/Teens No-Gi → Adult Gi → …"
+            )
 
         _list_expanded = (not _compact) or expanded
         with st.expander(
             f"Full apply list — {len(remaining)} remaining",
             expanded=_list_expanded and not _compact,
         ):
-            st.caption("Ordered for tournament workflow: Gi before No-Gi, younger ages first.")
+            st.caption(
+                "Order: Kids/Teens Gi → Kids/Teens No-Gi → Adult Gi → Adult No-Gi "
+                "(finish one entry type before switching)."
+            )
             for _mi, (_idx, _m) in enumerate(remaining):
                 st.markdown(
                     f"**{_mi + 1}. {_m['athlete_name']}**  \n"
@@ -2512,7 +2574,8 @@ def build_decision_queue(
 
     active_items = [i for i in items if not i["skipped"]]
     skipped_items = [i for i in items if i["skipped"]]
-    active_items.sort(key=lambda i: (i["priority"], str(i["name"])))
+    # Kids/Teens Gi before Kids/Teens No-Gi (not alphabetical by athlete name).
+    active_items.sort(key=decision_queue_sort_key)
     # Skipped go to end of queue
     return active_items + skipped_items
 

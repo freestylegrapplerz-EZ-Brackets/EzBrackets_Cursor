@@ -1,7 +1,7 @@
 # Tournament Director Notes — Real Event Review
 
 Notes captured while reviewing a real Smoothcomp CSV.  
-**Status:** Notes 1–11 implemented. Keep adding notes below as bracket work continues.
+**Status:** Notes 1–12 implemented. Keep adding notes below as bracket work continues.
 
 ---
 
@@ -242,13 +242,30 @@ After accepting moves, directors still had high friction applying them in Smooth
 
 ### Implementation
 - `applied` / `applied_at` on move records (migrated for older session files)
-- Workflow sort: Gi → No-Gi, younger ages first, then gender, destination, athlete
+- Workflow sort: Kids/Teens Gi → Kids/Teens No-Gi → Adult Gi → … (FROM division)
+- Focus/Queue uses the same cohort + entry order (not alphabetical by athlete name)
 - Apply panel after completion (and collapsed expander mid-review)
 - Session JSON stores `smoothcomp_event_url` and applied flags
 - Scoring / recommendation ranking unchanged
 
 ---
 
+## Note 12 — Don’t jump Adam Gi → Adam No-Gi before other Gi kids
+
+**Date captured:** 2026-08-18  
+**Status:** Implemented
+
+### Observation
+Starting review/apply, Adam Newman Gi was followed immediately by Adam Newman No-Gi instead of finishing the rest of Kids/Teens Gi first.
+
+### Cause
+Focus/Queue sorted by athlete name after priority, so the same person’s Gi and No-Gi decisions sat back-to-back.
+
+### Fix
+Shared workflow order for Focus/Queue and Apply Mode: age cohort → Gi before No-Gi → safer priority → finer age/gender → division → name.
+
+---
+
 ## Additional notes
 
-_(Add Note 12, etc. below as the event review continues.)
+_(Add Note 13, etc. below as the event review continues.)
