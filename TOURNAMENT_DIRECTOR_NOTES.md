@@ -1,7 +1,7 @@
 # Tournament Director Notes — Real Event Review
 
 Notes captured while reviewing a real Smoothcomp CSV.  
-**Status:** Notes 1–10 implemented. Keep adding notes below as bracket work continues.
+**Status:** Notes 1–11 implemented. Keep adding notes below as bracket work continues.
 
 ---
 
@@ -226,6 +226,29 @@ Accepting a move from Single A into Single B’s division left Athlete B in the 
 
 ---
 
+## Note 11 — Apply Mode + compact Smoothcomp companion
+
+**Date captured:** 2026-08-18  
+**Status:** Implemented
+
+### Problem
+After accepting moves, directors still had high friction applying them in Smoothcomp: jump between apps, re-type athlete names and destinations, lose track of what was already applied, and treat the Action Plan as the only checklist.
+
+### Product requirement
+1. **Apply Mode** — workflow-ordered list of accepted moves with Copy Athlete / Copy Destination / Mark Applied
+2. Progress: Planned / Applied / Remaining (clear that Smoothcomp is not auto-updated)
+3. Save/Resume keeps Applied status + optional Smoothcomp event URL (Open only — no credentials)
+4. **Compact companion** for side-by-side use with Smoothcomp (next unapplied move large)
+
+### Implementation
+- `applied` / `applied_at` on move records (migrated for older session files)
+- Workflow sort: Gi → No-Gi, younger ages first, then gender, destination, athlete
+- Apply panel after completion (and collapsed expander mid-review)
+- Session JSON stores `smoothcomp_event_url` and applied flags
+- Scoring / recommendation ranking unchanged
+
+---
+
 ## Additional notes
 
-_(Add Note 11, etc. below as the event review continues.)
+_(Add Note 12, etc. below as the event review continues.)
