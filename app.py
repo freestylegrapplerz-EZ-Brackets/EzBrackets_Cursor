@@ -9,8 +9,8 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.2.5
-# Treat Juvenile/Men/Kids Gi as the same entry type for Adult step-ups
+# EZ BRACKETS - v1.3.0
+# Apply Mode + compact Smoothcomp companion
 # =========================
 
 st.set_page_config(
@@ -483,6 +483,52 @@ st.markdown(
         background: linear-gradient(135deg, rgba(34,197,94,0.16), rgba(15,23,42,0.9));
         border: 1px solid rgba(34,197,94,0.4);
         margin: 12px 0 18px 0;
+    }
+    .ez-apply-panel {
+        padding: 22px 24px;
+        border-radius: 20px;
+        background: linear-gradient(135deg, rgba(59,130,246,0.14), rgba(15,23,42,0.92));
+        border: 1px solid rgba(59,130,246,0.35);
+        margin: 12px 0 18px 0;
+    }
+    .ez-apply-next {
+        padding: 18px 20px;
+        border-radius: 16px;
+        background: rgba(15,23,42,0.85);
+        border: 1px solid rgba(34,197,94,0.45);
+        margin: 10px 0 14px 0;
+    }
+    .ez-apply-athlete {
+        font-size: 26px;
+        font-weight: 900;
+        color: #f8fafc;
+        line-height: 1.2;
+        margin: 0 0 8px 0;
+    }
+    .ez-apply-path {
+        color: #cbd5e1;
+        font-size: 14px;
+        margin: 0 0 4px 0;
+    }
+    .ez-apply-to {
+        color: #86efac;
+        font-size: 16px;
+        font-weight: 800;
+        margin: 0 0 8px 0;
+    }
+    .ez-apply-why {
+        color: #94a3b8;
+        font-size: 13px;
+        margin: 0;
+    }
+    .ez-apply-done-row {
+        padding: 8px 12px;
+        border-radius: 10px;
+        background: rgba(34,197,94,0.08);
+        border: 1px solid rgba(34,197,94,0.2);
+        margin-bottom: 6px;
+        color: #bbf7d0;
+        font-size: 13px;
     }
     .ez-primary-cta {
         display: block;
@@ -1904,9 +1950,271 @@ def format_action_plan_text(moves):
             lines.append(f"   ⚠️  {m['academy_warning']}")
         if m.get("director_notes"):
             lines.append(f"   Note: {m['director_notes']}")
+        if m.get("applied"):
+            lines.append("   Applied: yes")
         lines.append("")
     lines.append("Apply each move in Smoothcomp before publishing brackets.")
     return "\n".join(lines)
+
+
+def migrate_moves_applied_fields(moves):
+    """Ensure older saved moves have applied tracking fields."""
+    if not isinstance(moves, list):
+        return []
+    for m in moves:
+        if not isinstance(m, dict):
+            continue
+        m.setdefault("applied", False)
+        m.setdefault("applied_at", "")
+    return moves
+
+
+def apply_mode_stats(moves):
+    """Counts for Apply Mode progress: planned / applied / remaining."""
+    migrate_moves_applied_fields(moves)
+    active = [m for m in moves if m.get("status") == "Active"]
+    applied = sum(1 for m in active if m.get("applied"))
+    planned = len(active)
+    return {
+        "planned": planned,
+        "applied": applied,
+        "remaining": planned - applied,
+    }
+
+
+def entry_workflow_rank(entry):
+    """Gi before No-Gi for Smoothcomp apply order."""
+    norm = normalize_entry_type(entry)
+    if norm == "gi":
+        return 0
+    if norm == "no-gi":
+        return 1
+    return 2
+
+
+def gender_workflow_rank(gender):
+    """Mixed/open first (kids), then female, then male."""
+    g = str(gender or "").strip().lower()
+    if not g or "male/female" in g or g in {"mixed", "open", "any"}:
+        return 0
+    if g in FEMALE_GENDER_TOKENS or "female" in g or "women" in g or "girl" in g:
+        return 1
+    if g in MALE_GENDER_TOKENS or "male" in g or "men" in g or "boy" in g:
+        return 2
+    return 3
+
+
+def workflow_sort_key_for_move(move):
+    """Tournament-sensible apply order: Entry → Age → Gender → Destination → Athlete.
+
+    Uses the destination division so directors can batch athletes landing in
+    nearby brackets. Does not change scoring — display/ops only.
+    """
+    dest = str(move.get("new_division", "") or "")
+    entry, _skill, age, _weight, gender = parse_group(dest)
+    return (
+        entry_workflow_rank(entry),
+        age_value(age),
+        gender_workflow_rank(gender),
+        dest.lower(),
+        str(move.get("athlete_name", "") or "").lower(),
+    )
+
+
+def sorted_active_moves_with_index(moves):
+    """Active moves as (original_index, move) sorted for Apply Mode workflow."""
+    migrate_moves_applied_fields(moves)
+    indexed = [
+        (i, m) for i, m in enumerate(moves)
+        if isinstance(m, dict) and m.get("status") == "Active"
+    ]
+    indexed.sort(key=lambda pair: workflow_sort_key_for_move(pair[1]))
+    return indexed
+
+
+def format_apply_why(move):
+    """Short why line for Apply Mode companion cards."""
+    bits = [f"Score {move.get('score', '?')}/100"]
+    aw = str(move.get("academy_warning") or "").strip()
+    if aw:
+        bits.append(aw if len(aw) <= 70 else aw[:67] + "…")
+    notes = str(move.get("director_notes") or "").strip()
+    if notes:
+        bits.append(notes if len(notes) <= 70 else notes[:67] + "…")
+    return " · ".join(bits)
+
+
+def normalize_smoothcomp_event_url(url):
+    """Return a safe http(s) Smoothcomp event URL, or empty string."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if not re.match(r"^https?://", raw, flags=re.IGNORECASE):
+        raw = "https://" + raw
+    if not re.match(r"^https?://", raw, flags=re.IGNORECASE):
+        return ""
+    return raw
+
+
+def render_apply_to_smoothcomp(moves, *, expanded=True, key_prefix="apply"):
+    """Render Apply Mode: workflow list + compact companion for Smoothcomp.
+
+    Does not contact Smoothcomp — copy/paste helper only.
+    """
+    migrate_moves_applied_fields(moves)
+    stats = apply_mode_stats(moves)
+    if stats["planned"] == 0:
+        return
+
+    indexed = sorted_active_moves_with_index(moves)
+    remaining = [(i, m) for i, m in indexed if not m.get("applied")]
+    applied_list = [(i, m) for i, m in indexed if m.get("applied")]
+
+    st.markdown('<div class="ez-apply-panel">', unsafe_allow_html=True)
+    st.subheader("Apply to Smoothcomp")
+    st.markdown(
+        "EZ Brackets has **not** updated Smoothcomp. Use this list to apply accepted "
+        "moves there, then mark each one Applied. Save Progress keeps Applied status."
+    )
+
+    _url_col, _open_col = st.columns([4, 1])
+    with _url_col:
+        st.text_input(
+            "Smoothcomp event URL (optional)",
+            key="smoothcomp_event_url",
+            placeholder="https://smoothcomp.com/en/event/…",
+            help="Opens your event in a new tab. EZ Brackets never logs into Smoothcomp.",
+        )
+    with _open_col:
+        st.write("")
+        st.write("")
+        _event_url = normalize_smoothcomp_event_url(
+            st.session_state.get("smoothcomp_event_url", "")
+        )
+        if _event_url:
+            st.link_button("Open event", _event_url, type="primary")
+        else:
+            st.caption("Add URL to open")
+
+    _p1, _p2, _p3 = st.columns(3)
+    with _p1:
+        st.markdown(
+            f'<div class="ez-sticky-progress"><span class="ez-pill ez-pill-amber">'
+            f'Planned <b>{stats["planned"]}</b></span></div>',
+            unsafe_allow_html=True,
+        )
+    with _p2:
+        st.markdown(
+            f'<div class="ez-sticky-progress"><span class="ez-pill ez-pill-green">'
+            f'Applied <b>{stats["applied"]}</b></span></div>',
+            unsafe_allow_html=True,
+        )
+    with _p3:
+        _rem_cls = "ez-pill-red" if stats["remaining"] else "ez-pill-green"
+        st.markdown(
+            f'<div class="ez-sticky-progress"><span class="ez-pill {_rem_cls}">'
+            f'Remaining <b>{stats["remaining"]}</b></span></div>',
+            unsafe_allow_html=True,
+        )
+
+    if "apply_compact_companion" not in st.session_state:
+        st.session_state["apply_compact_companion"] = True
+    st.checkbox(
+        "Compact companion (side-by-side with Smoothcomp)",
+        key="apply_compact_companion",
+        help="Shows the next unapplied move large — put EZ Brackets beside Smoothcomp.",
+    )
+    _compact = bool(st.session_state.get("apply_compact_companion", True))
+
+    if not remaining:
+        st.success("All planned moves are marked Applied. Double-check Smoothcomp, then publish.")
+    else:
+        if _compact:
+            _idx, _next = remaining[0]
+            st.markdown("#### Next move")
+            st.markdown(
+                f'<div class="ez-apply-next">'
+                f'<div class="ez-apply-athlete">{_next["athlete_name"]}</div>'
+                f'<p class="ez-apply-path">FROM: {_next["original_division"]}</p>'
+                f'<p class="ez-apply-to">TO: {_next["new_division"]}</p>'
+                f'<p class="ez-apply-why">{format_apply_why(_next)}</p>'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            _c1, _c2, _c3 = st.columns([2, 2, 1])
+            with _c1:
+                st.caption("Copy athlete")
+                st.code(_next["athlete_name"], language="")
+            with _c2:
+                st.caption("Copy destination")
+                st.code(_next["new_division"], language="")
+            with _c3:
+                st.write("")
+                st.write("")
+                if st.button(
+                    "✅ Mark Applied",
+                    key=f"{key_prefix}_mark_next_{_idx}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    st.session_state["moves"][_idx]["applied"] = True
+                    st.session_state["moves"][_idx]["applied_at"] = (
+                        datetime.now().strftime("%Y-%m-%d %H:%M")
+                    )
+                    st.rerun()
+            st.caption(f"{len(remaining)} remaining · ordered Gi → No-Gi, younger ages first")
+
+        _list_expanded = (not _compact) or expanded
+        with st.expander(
+            f"Full apply list — {len(remaining)} remaining",
+            expanded=_list_expanded and not _compact,
+        ):
+            st.caption("Ordered for tournament workflow: Gi before No-Gi, younger ages first.")
+            for _mi, (_idx, _m) in enumerate(remaining):
+                st.markdown(
+                    f"**{_mi + 1}. {_m['athlete_name']}**  \n"
+                    f"FROM: `{_m['original_division']}`  \n"
+                    f"TO: `{_m['new_division']}`  \n"
+                    f"{format_apply_why(_m)}"
+                )
+                _a1, _a2, _a3 = st.columns([2, 2, 1])
+                with _a1:
+                    st.code(_m["athlete_name"], language="")
+                with _a2:
+                    st.code(_m["new_division"], language="")
+                with _a3:
+                    if st.button(
+                        "Mark Applied",
+                        key=f"{key_prefix}_mark_{_idx}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["moves"][_idx]["applied"] = True
+                        st.session_state["moves"][_idx]["applied_at"] = (
+                            datetime.now().strftime("%Y-%m-%d %H:%M")
+                        )
+                        st.rerun()
+                st.divider()
+
+    if applied_list:
+        with st.expander(f"Applied ({len(applied_list)})", expanded=False):
+            for _idx, _m in applied_list:
+                _when = _m.get("applied_at") or ""
+                st.markdown(
+                    f'<div class="ez-apply-done-row">'
+                    f'✅ <b>{_m["athlete_name"]}</b> → {_m["new_division"]}'
+                    f'{(" · " + _when) if _when else ""}'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    "Undo Applied",
+                    key=f"{key_prefix}_unmark_{_idx}",
+                ):
+                    st.session_state["moves"][_idx]["applied"] = False
+                    st.session_state["moves"][_idx]["applied_at"] = ""
+                    st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def build_safety_bullets(rec_row):
@@ -2219,11 +2527,14 @@ def append_accepted_move(athlete_name, original_division, new_division, score, a
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "director_notes": "",
         "status": "Active",
+        "applied": False,
+        "applied_at": "",
     })
 
 
 def build_session_payload():
     """Build the current progress payload for Save Progress."""
+    migrate_moves_applied_fields(st.session_state.get("moves", []))
     active = [m for m in st.session_state.get("moves", []) if m.get("status") == "Active"]
     skipped = st.session_state.get("guided_skipped", set())
     manual = st.session_state.get("manual_review", set())
@@ -2238,9 +2549,11 @@ def build_session_payload():
         "guided_layout": st.session_state.get("guided_layout_radio", "Focus Mode"),
         "focus_index": int(st.session_state.get("focus_index", 0) or 0),
         "csv_hash": st.session_state.get("csv_hash", ""),
+        "smoothcomp_event_url": st.session_state.get("smoothcomp_event_url", ""),
         "active_moves": len(active),
         "skipped_count": len(skipped),
         "manual_count": len(manual),
+        "applied_count": sum(1 for m in active if m.get("applied")),
     }
 
 
@@ -2256,8 +2569,9 @@ def session_has_progress():
     return False
 
 
-def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash="", manual_review=None, guided_layout="", focus_index=0):
+def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash="", manual_review=None, guided_layout="", focus_index=0, smoothcomp_event_url=""):
     """Serialize session state to a JSON-safe dict."""
+    migrate_moves_applied_fields(moves)
     return {
         "ez_brackets_version": "1.0",
         "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -2269,6 +2583,7 @@ def session_to_json(moves, guided_skipped, preset, view_mode, csv_hash="", manua
         "guided_layout": guided_layout or "",
         "focus_index": int(focus_index or 0),
         "csv_hash": csv_hash or "",
+        "smoothcomp_event_url": smoothcomp_event_url or "",
     }
 
 
@@ -2286,14 +2601,18 @@ def restore_session_from_json(data):
     for m in moves:
         if not isinstance(m, dict) or not required.issubset(m.keys()):
             return False, "Session file contains invalid move records."
+    migrate_moves_applied_fields(moves)
     return True, data
 
 
 def apply_restored_session(result):
     """Apply validated session data into Streamlit session_state."""
-    st.session_state["moves"] = result["moves"]
+    moves = result["moves"]
+    migrate_moves_applied_fields(moves)
+    st.session_state["moves"] = moves
     st.session_state["guided_skipped"] = set(result.get("guided_skipped", []))
     st.session_state["manual_review"] = set(result.get("manual_review", []))
+    st.session_state["smoothcomp_event_url"] = str(result.get("smoothcomp_event_url", "") or "")
     saved_preset = result.get("last_preset", "")
     if saved_preset in SCORING_PRESETS:
         st.session_state["rule_preset_select"] = saved_preset
@@ -2317,12 +2636,14 @@ def apply_restored_session(result):
         st.session_state["focus_index"] = 0
     st.session_state["restore_key_counter"] = st.session_state.get("restore_key_counter", 0) + 1
     st.session_state["restore_csv_hash"] = result.get("csv_hash", "")
-    active_n = sum(1 for m in result.get("moves", []) if m.get("status") == "Active")
+    active_n = sum(1 for m in moves if m.get("status") == "Active")
+    applied_n = sum(1 for m in moves if m.get("status") == "Active" and m.get("applied"))
     skipped_n = len(result.get("guided_skipped", []) or [])
     manual_n = len(result.get("manual_review", []) or [])
     st.session_state["restore_notice"] = (
-        f"Resumed progress — {active_n} move(s) planned, {skipped_n} skipped, "
-        f"{manual_n} manual review"
+        f"Resumed progress — {active_n} move(s) planned"
+        + (f" ({applied_n} already applied)" if applied_n else "")
+        + f", {skipped_n} skipped, {manual_n} manual review"
         + (f" (saved {result.get('saved_at', '')})" if result.get("saved_at") else "")
         + ". Continue in Focus Mode below."
     )
@@ -2559,6 +2880,9 @@ else:
 if data_ready:
     if "moves" not in st.session_state:
         st.session_state["moves"] = []
+    migrate_moves_applied_fields(st.session_state.get("moves", []))
+    if "smoothcomp_event_url" not in st.session_state:
+        st.session_state["smoothcomp_event_url"] = ""
     if "move_back_alerts" not in st.session_state:
         st.session_state["move_back_alerts"] = []
     if "guided_skipped" not in st.session_state:
@@ -2904,14 +3228,20 @@ if data_ready:
     _review_complete = _decisions_remaining == 0 and _total_problems > 0
     if _review_complete:
         _plan_text = format_action_plan_text(st.session_state.get("moves", []))
+        _apply_stats = apply_mode_stats(st.session_state.get("moves", []))
         st.markdown('<div class="ez-complete-panel">', unsafe_allow_html=True)
         st.subheader("✅ Bracket Review Complete")
         st.markdown(
             f"**{_active_moves_count}** moves planned · **{_skipped_count}** skipped · "
             f"**{_manual_count}** manual review.  \n"
-            "EZ Brackets has **not** updated Smoothcomp. Download or copy your Action Plan, "
-            "then apply the changes in Smoothcomp **before publishing brackets**."
+            "EZ Brackets has **not** updated Smoothcomp. Use **Apply to Smoothcomp** below "
+            "to copy each move and mark it Applied, or download the Action Plan backup."
         )
+        if _apply_stats["planned"]:
+            st.caption(
+                f"Apply progress: {_apply_stats['applied']} applied · "
+                f"{_apply_stats['remaining']} remaining"
+            )
         _nb1, _nb2 = st.columns(2)
         with _nb1:
             if _plan_text:
@@ -2927,21 +3257,23 @@ if data_ready:
         with _nb2:
             st.markdown("**Smoothcomp checklist**")
             st.markdown(
-                "1. Open Smoothcomp  \n"
-                "2. Apply each accepted move  \n"
-                "3. Review skipped / manual items  \n"
-                "4. Publish brackets"
+                "1. Open Smoothcomp (link in Apply Mode)  \n"
+                "2. Copy athlete → paste / search  \n"
+                "3. Copy destination → change category  \n"
+                "4. Mark Applied in EZ Brackets  \n"
+                "5. Publish brackets when Remaining is 0"
             )
         if _plan_text:
-            st.markdown("**Copy Action Plan**")
-            st.code(_plan_text, language="")
+            with st.expander("Copy full Action Plan (backup)", expanded=False):
+                st.code(_plan_text, language="")
 
         _active_moves_list = [m for m in st.session_state.get("moves", []) if m.get("status") == "Active"]
         if _active_moves_list:
             with st.expander(f"Moves planned ({len(_active_moves_list)})", expanded=False):
                 for m in _active_moves_list:
+                    _done = " ✅" if m.get("applied") else ""
                     st.markdown(
-                        f"- **{m['athlete_name']}**: {m['original_division']} → {m['new_division']}"
+                        f"- **{m['athlete_name']}**: {m['original_division']} → {m['new_division']}{_done}"
                     )
         if _manual_count:
             with st.expander(f"Manual review ({_manual_count})", expanded=False):
@@ -2954,6 +3286,27 @@ if data_ready:
                     if item.get("skipped"):
                         st.markdown(f"- **{item['name']}** · {item['group']}")
         st.markdown("</div>", unsafe_allow_html=True)
+
+    # Apply Mode — prominent when review is done; available collapsed mid-review
+    if _active_moves_count > 0:
+        if _review_complete:
+            render_apply_to_smoothcomp(
+                st.session_state.get("moves", []),
+                expanded=True,
+                key_prefix="apply_main",
+            )
+        else:
+            _as_mid = apply_mode_stats(st.session_state.get("moves", []))
+            with st.expander(
+                f"Apply to Smoothcomp — {_as_mid['remaining']} remaining · "
+                f"{_as_mid['applied']} applied",
+                expanded=False,
+            ):
+                render_apply_to_smoothcomp(
+                    st.session_state.get("moves", []),
+                    expanded=False,
+                    key_prefix="apply_mid",
+                )
 
     # ── View Mode Toggle ──────────────────────────────────────────────────────
     st.markdown("### Step 2 — Review recommendations")
@@ -3230,10 +3583,10 @@ if data_ready:
                             st.rerun()
 
         if not _review_complete and _active_moves_count > 0:
+            _as = apply_mode_stats(st.session_state.get("moves", []))
             st.info(
-                f"{_active_moves_count} move(s) planned so far. "
-                "When you finish, use the completion panel to copy/download your Action Plan "
-                "and apply it in Smoothcomp."
+                f"{_active_moves_count} move(s) planned · {_as['remaining']} still to apply in Smoothcomp. "
+                "Use **Apply to Smoothcomp** above anytime — you do not have to wait until review is done."
             )
 
     # ── Advanced Table View (only when selected) ──────────────────────────────
@@ -3392,16 +3745,13 @@ if data_ready:
                                 "and cannot be accepted."
                             )
                         else:
-                            st.session_state["moves"].append({
-                                "athlete_name": _athlete_to_accept,
-                                "original_division": str(_row["Current Division"]),
-                                "new_division": str(_row["Suggested Division"]),
-                                "score": int(_row["Match Score"]),
-                                "academy_warning": str(_row.get("Academy Warning", "")),
-                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                "director_notes": "",
-                                "status": "Active",
-                            })
+                            append_accepted_move(
+                                _athlete_to_accept,
+                                str(_row["Current Division"]),
+                                str(_row["Suggested Division"]),
+                                int(_row["Match Score"]),
+                                str(_row.get("Academy Warning", "")),
+                            )
                             st.rerun()
 
             with tab2:
@@ -3538,6 +3888,9 @@ if data_ready:
             )
 
             _move_df = pd.DataFrame(st.session_state["moves"])
+            if "applied" not in _move_df.columns:
+                _move_df["applied"] = False
+            _move_df["Applied"] = _move_df["applied"].map(lambda x: "Yes" if x else "No")
             _move_display = _move_df.rename(columns={
                 "athlete_name": "Athlete",
                 "original_division": "Original Division",
@@ -3551,7 +3904,7 @@ if data_ready:
             st.dataframe(
                 _move_display[[
                     "Athlete", "Original Division", "New Division",
-                    "Score", "Academy Warning", "Accepted", "Notes", "Status",
+                    "Score", "Academy Warning", "Accepted", "Notes", "Status", "Applied",
                 ]],
                 use_container_width=True,
             )
@@ -3605,7 +3958,7 @@ if data_ready:
                 "Download Move Log CSV",
                 data=to_csv_bytes(_move_display[[
                     "Athlete", "Original Division", "New Division",
-                    "Score", "Academy Warning", "Accepted", "Notes", "Status",
+                    "Score", "Academy Warning", "Accepted", "Notes", "Status", "Applied",
                 ]]),
                 file_name="ez_brackets_move_log.csv",
                 mime="text/csv",
