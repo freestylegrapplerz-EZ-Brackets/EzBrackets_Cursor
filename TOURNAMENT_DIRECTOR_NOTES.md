@@ -1,7 +1,7 @@
 # Tournament Director Notes — Real Event Review
 
 Notes captured while reviewing a real Smoothcomp CSV.  
-**Status:** Notes 1–13 implemented. Keep adding notes below as bracket work continues.
+**Status:** Notes 1–14 implemented. Keep adding notes below as bracket work continues.
 
 ---
 
@@ -287,6 +287,34 @@ Shared workflow order for Focus/Queue and Apply Mode: age cohort → Gi before N
 
 ---
 
+## Note 14 — Market-readiness review: Phase 1 “trust the decisions” fixes
+
+**Date captured:** 2026-09-06  
+**Status:** Implemented (source-reproduced at commit `75cefc4`, all confirmed)
+
+### Confirmed findings → fixes
+| # | Finding (reproduced) | Fix |
+|---|---|---|
+| C1 | Unknown source weight scored 94 / Excellent / Safe Match / Looks Safe | New **Data Gaps** state: missing weight/skill/age (or gender where it matters) → **Needs Data Review** / “Missing information”; never Safe; ranks after complete-data rows; Focus offers *Accept — I verified in Smoothcomp* instead of a normal Accept |
+| C2 | 60–65 kg vs 80–85 kg treated as a 20 lb gap → Safe Match | `weight_mid` detects **kg** and converts to lbs (≈44 lb gap → Do Not Match). Import check reports kg / unit-less labels (unit-less = assumed lbs) |
+| C3 | Apply Mode says Copy (keep original) but planned counts subtracted from source | Actions now carry `apply_method` (**copy**/**move**, sidebar setting). Copy keeps original count; source division is *handled* (athlete has a planned opponent) rather than pretended empty. Action Plan / Apply Mode say Copy · KEEP IN vs Move · FROM |
+| C4 | Academy-conflict accept stored `"a, b, c"` as one athlete → counts 2 left / 3 at destination | Group accept expands to **one record per athlete** (shared `group_action_id`); counts, checklist and Apply Mode are per athlete; revert reverts the whole group |
+| H1 | White→Blue = “20 skill levels”; Master 2→Master 3 = “10 age groups” (Master 3 parsed as age 3!) | Distinct **adult belt / youth belt / experience** ladders (White→Blue = 1; belt vs experience = fixed review gap with note). `Master N` digits stripped before age parsing; Adult/Masters compared by category index |
+| H2 | “Only analyze approved athletes” silently analysed all rows when 0 approved | Filter always applies; explicit empty state tells the director to change the setting |
+| H3 | Unknown gender in Adult division scored 100 / Looks Safe | Unknown ≠ compatible: gap flagged when one side is gendered and the other not, or when the file encodes gender elsewhere. Files with no gender anywhere get one import-check notice |
+| H4 | Juvenile 16–17 → Adult bypassed the age limit globally | Now an explicit **organizer setting** (`juvenile_adult_step_up`; on in FG / Adult Standard / Emergency, off in Kids Conservative). Counts as 1 step and is **still checked** against the age limit; wording says “confirm approval” |
+
+### Additional gaps closed
+- Session save/restore now stores **all rule/filter values** (weight/age/skill limits, penalties, approved-only, min target, top-N, crossover, Juvenile rule) + apply method
+- New CSV while actions exist → **“Same event — keep” / “Different event — start fresh”** with a reconciliation preview (matched, already in destination, athlete/division not found)
+- Rank-1 suggestions export renamed **Recommendation report** (not “Action Plan”); Action Plan = accepted actions only
+- Completion panel distinguishes *suggestions reviewed* / *applied in Smoothcomp N/M* / *verify with fresh export*
+
+### Not in this PR (later phases)
+Accounts, billing, autosave/DB, shared staff access, whole-event plan comparison, hosting/uptime — product decisions for the paid pilot.
+
+---
+
 ## Additional notes
 
-_(Add Note 14, etc. below as the event review continues.)
+_(Add Note 15, etc. below as the event review continues.)
