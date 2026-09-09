@@ -317,4 +317,21 @@ Accounts, billing, autosave/DB, shared staff access, whole-event plan comparison
 
 ## Additional notes
 
-_(Add Note 15, etc. below as the event review continues.)
+## Note 15 — Beginner workflow and event reliability
+
+**Date captured:** 2026-09-09
+**Status:** Implemented locally in v1.5 (`codex/novice-readiness`); not deployed.
+
+- Explicit practice/upload/restore screen, followed by Review → Apply → Finish.
+- One decision at a time with plain explanations; score details kept secondary.
+- Portable backup includes registrations, rules, notes, and decisions.
+- Project the roster after accepted actions; refreshed exports do not double-count copies.
+- Keep practice separate from real events; validate replacement files and saved actions.
+- Reopen manual-review items even after the review queue is empty.
+- All alternatives use the same missing-data acknowledgment and rule blocking.
+- Missing gender on relevant divisions needs a per-decision check, including entirely unlabeled files.
+- Reject missing/duplicate identities, conflicting division fields, and malformed CSV rows.
+- Preserve mapped destination fields and rule settings through navigation.
+- Separate planned, applied, and verified states in the handoff.
+
+See [PRODUCT_READINESS.md](PRODUCT_READINESS.md) for validation, pilot criteria, and paid-launch requirements. Durable autosave, private accounts, billing, and production deployment remain future work.
