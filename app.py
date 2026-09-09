@@ -9,8 +9,9 @@ import streamlit as st
 
 
 # =========================
-# EZ BRACKETS - v1.3.2
-# Apply Mode mirrors Smoothcomp Copy + dropdowns + notes
+# EZ BRACKETS - v1.4.0
+# Trust fixes: data-completeness state, kg units, belt ladders, Masters ages,
+# approved-only filter, Copy vs Move event state, per-athlete group actions
 # =========================
 
 st.set_page_config(
@@ -820,14 +821,61 @@ def parse_group(group):
 
 
 def rank_scored_candidates(scored):
-    """Prefer reviewable options over equal-score Do Not Match rows."""
+    """Prefer reviewable options over equal-score Do Not Match rows.
+
+    Complete-data rows rank ahead of rows with missing division data, which in
+    turn rank ahead of rule-blocked rows.
+    """
     return sorted(
         scored,
         key=lambda x: (
             1 if str(x.get("Safety Flag", "")).strip() else 0,
+            1 if str(x.get("Data Gaps", "")).strip() else 0,
             -int(x.get("Match Score", 0) or 0),
         ),
     )
+
+
+def event_has_gender_data(df):
+    """True when any division in the file states a gender (path or entry)."""
+    if df is None or df.empty:
+        return False
+    if "gender_clean" in df.columns and df["gender_clean"].astype(str).str.strip().ne("").any():
+        return True
+    for col in ("group_clean", "entry_clean"):
+        if col in df.columns and df[col].astype(str).map(extract_gender).ne("").any():
+            return True
+    return False
+
+
+def with_event_context(scoring_settings, df):
+    """Attach file-level facts the scorer needs (currently: does gender appear anywhere)."""
+    merged = dict(scoring_settings or {})
+    merged.setdefault("event_has_gender_data", event_has_gender_data(df))
+    return merged
+
+
+def recommendation_is_safe(rec_row):
+    """Safe = passes the rules AND has complete data. Missing data is never safe."""
+    if rec_row is None:
+        return False
+    if str(rec_row.get("Safety Flag", "") or "").strip():
+        return False
+    if str(rec_row.get("Data Gaps", "") or "").strip():
+        return False
+    return True
+
+
+def apply_approved_filter(working, only_approved):
+    """Apply the approved-only filter even when it leaves zero rows.
+
+    Silently falling back to all rows analysed athletes who were not eligible
+    yet. Callers show an explicit empty state instead.
+    """
+    if only_approved and "approved_clean" in working.columns:
+        approved_mask = working["approved_clean"].astype(str).str.lower().eq("approved")
+        return working[approved_mask]
+    return working
 
 
 def skill_value(skill):
@@ -838,9 +886,72 @@ def skill_value(skill):
     return 999
 
 
+# Distinct ranking systems. A "level" only means something inside one ladder.
+ADULT_BELT_LADDER = ["white", "blue", "purple", "brown", "black"]
+YOUTH_BELT_LADDER = ["white", "grey", "gray", "yellow", "orange", "green"]
+EXPERIENCE_LADDER = ["novice", "beginner", "intermediate", "advanced", "expert"]
+CROSS_LADDER_SKILL_STEPS = 3
+
+
+def skill_rank(skill, age_label=""):
+    """Return (ladder, index) for a skill label, or (None, None) if unknown.
+
+    ``white`` is shared by the adult and youth belt ladders; the age label
+    decides which ladder applies so White→Blue (adult) is one belt, not 20.
+    """
+    s = str(skill or "").strip().lower()
+    if not s:
+        return None, None
+    for i, name in enumerate(EXPERIENCE_LADDER):
+        if name in s:
+            return "experience", i
+    youth_context = is_youth_kids_age(age_label) or is_juvenile_16_17(age_label)
+    youth_only = [n for n in YOUTH_BELT_LADDER if n != "white"]
+    adult_only = [n for n in ADULT_BELT_LADDER if n != "white"]
+    for name in youth_only:
+        if name in s:
+            idx = YOUTH_BELT_LADDER.index(name)
+            # grey/gray share a slot
+            if name in ("grey", "gray"):
+                idx = 1
+            elif idx > 2:
+                idx -= 1
+            return "youth_belt", idx
+    for name in adult_only:
+        if name in s:
+            return "adult_belt", ADULT_BELT_LADDER.index(name)
+    if "white" in s:
+        return ("youth_belt", 0) if youth_context else ("adult_belt", 0)
+    return None, None
+
+
+def skill_step_difference(src_skill, tgt_skill, src_age="", tgt_age=""):
+    """Skill gap in ladder steps.
+
+    Returns (steps, note). ``steps`` is 999 when either side is unknown.
+    Belt vs experience-level systems cannot be compared numerically, so a
+    cross-ladder pair returns a fixed review-level gap with an explanatory note.
+    """
+    s_lad, s_idx = skill_rank(src_skill, src_age)
+    t_lad, t_idx = skill_rank(tgt_skill, tgt_age)
+    if s_lad is None or t_lad is None:
+        return 999, ""
+    if s_lad == t_lad:
+        return abs(s_idx - t_idx), ""
+    # White belt appears in both belt ladders — treat white↔white as equal.
+    if {s_lad, t_lad} == {"adult_belt", "youth_belt"} and s_idx == 0 and t_idx == 0:
+        return 0, ""
+    return CROSS_LADDER_SKILL_STEPS, "belt vs experience-level systems differ — director must judge"
+
+
+def strip_masters_tokens(text):
+    """Remove 'Master 1/2/3' style tokens so the digit is never read as an age."""
+    return re.sub(r"masters?\s*\d+", " ", str(text or ""), flags=re.IGNORECASE)
+
+
 def age_year_midpoint(age):
     """Return midpoint of explicit year bands (e.g. 14-15 → 14.5), else None."""
-    nums = [int(n) for n in re.findall(r"\d+", str(age or ""))]
+    nums = [int(n) for n in re.findall(r"\d+", strip_masters_tokens(age))]
     if not nums:
         return None
     # Ignore non-age numbers that sometimes appear in labels (rare).
@@ -890,6 +1001,10 @@ def age_step_difference(src_age, tgt_age):
     if sv == 999 or tv == 999:
         return 999
     gap = abs(sv - tv)
+    # Adult / Masters ranks are category indexes (Adult 20, Master 1 21, ...):
+    # one index = one age group, so Master 1 → Master 3 is 2 steps, not "2 years".
+    if sv >= 20 and tv >= 20:
+        return int(round(gap))
     # Year-based ranks (e.g. 12.5 vs 14.5) → map to age-group steps.
     if gap <= 0.01:
         return 0
@@ -902,16 +1017,41 @@ def age_step_difference(src_age, tgt_age):
     return max(4, int(round(gap / 2.0)))
 
 
+KG_TO_LBS = 2.20462
+
+
+def weight_unit(weight):
+    """Return 'kg', 'lbs', or '' (no explicit unit in the label)."""
+    w = str(weight or "").lower()
+    if re.search(r"\bkgs?\b|kilo", w):
+        return "kg"
+    if re.search(r"\blbs?\b|pounds?", w):
+        return "lbs"
+    return ""
+
+
 def weight_mid(weight):
+    """Midpoint of a weight-class label, always returned in pounds.
+
+    Kilogram labels are converted so a 60–65 kg vs 80–85 kg pair is a ~44 lb
+    gap, not 20. Labels without a unit are assumed to be pounds (the import
+    check reports how many divisions lack an explicit unit).
+    """
     w = str(weight).lower()
     nums = re.findall(r"\d+\.?\d*", w)
+    unit = weight_unit(w)
+    mid = None
     if "over" in w and nums:
-        return float(nums[0]) + 10
-    if len(nums) >= 2:
-        return (float(nums[0]) + float(nums[1])) / 2
-    if len(nums) == 1:
-        return float(nums[0])
-    return None
+        mid = float(nums[0]) + (5 if unit == "kg" else 10)
+    elif len(nums) >= 2:
+        mid = (float(nums[0]) + float(nums[1])) / 2
+    elif len(nums) == 1:
+        mid = float(nums[0])
+    if mid is None:
+        return None
+    if unit == "kg":
+        return round(mid * KG_TO_LBS, 1)
+    return mid
 
 
 def normalize_entry_type(entry):
@@ -1116,6 +1256,9 @@ DEFAULT_SCORING_SETTINGS = {
     "max_safe_weight_diff": 20,
     "max_safe_age_diff": 1,
     "max_safe_skill_diff": 1,
+    # Organizer rule, not a universal truth: count Juvenile 16-17 → Adult as one
+    # age step. Off by default; presets that follow FG practice turn it on.
+    "juvenile_adult_step_up": False,
 }
 
 
@@ -1126,6 +1269,7 @@ SCORING_PRESETS = {
         "max_safe_skill_diff": 0,
         "same_academy_penalty": 45,
         "entry_crossover_penalty": 45,
+        "juvenile_adult_step_up": False,
     },
     "Adult Standard": {
         "max_safe_weight_diff": 20,
@@ -1133,6 +1277,7 @@ SCORING_PRESETS = {
         "max_safe_skill_diff": 1,
         "same_academy_penalty": 35,
         "entry_crossover_penalty": 30,
+        "juvenile_adult_step_up": True,
     },
     "Emergency Merge Mode": {
         "max_safe_weight_diff": 35,
@@ -1140,6 +1285,7 @@ SCORING_PRESETS = {
         "max_safe_skill_diff": 2,
         "same_academy_penalty": 20,
         "entry_crossover_penalty": 20,
+        "juvenile_adult_step_up": True,
     },
     "Freestyle Grapplerz Rules": {
         "max_safe_weight_diff": 20,
@@ -1147,13 +1293,18 @@ SCORING_PRESETS = {
         "max_safe_skill_diff": 1,
         "same_academy_penalty": 40,
         "entry_crossover_penalty": 35,
+        "juvenile_adult_step_up": True,
     },
 }
 
+NEEDS_DATA_LABEL = "Needs Data Review"
 
-def quality_label(score, safety_flag=""):
+
+def quality_label(score, safety_flag="", data_gaps=""):
     if safety_flag:
         return "Do Not Match"
+    if data_gaps:
+        return NEEDS_DATA_LABEL
     if score >= 85:
         return "Excellent"
     if score >= 75:
@@ -1165,9 +1316,11 @@ def quality_label(score, safety_flag=""):
     return "No strong match"
 
 
-def risk_badge(score, safety_flag=""):
+def risk_badge(score, safety_flag="", data_gaps=""):
     if safety_flag:
         return "Do Not Match"
+    if data_gaps:
+        return NEEDS_DATA_LABEL
     if score >= 85:
         return "Safe Match"
     if score >= 70:
@@ -1180,6 +1333,8 @@ def risk_badge(score, safety_flag=""):
 def action_text(action_type, source, target, quality):
     if quality == "Do Not Match":
         return f"Do not move {source} into {target} without director approval."
+    if quality == NEEDS_DATA_LABEL:
+        return f"Verify missing division data before moving {source} into {target}."
     if action_type == "single":
         return f"Move athlete from {source} into {target}."
     return f"Merge problem division {source} into {target}."
@@ -1300,9 +1455,7 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
     ):
         return None
 
-    skill_diff = abs(skill_value(src_skill) - skill_value(tgt_skill))
-    if skill_value(src_skill) == 999 and skill_value(tgt_skill) == 999:
-        skill_diff = 999
+    skill_diff, skill_note = skill_step_difference(src_skill, tgt_skill, src_age, tgt_age)
     raw_age_diff = age_step_difference(src_age, tgt_age)
 
     sw = weight_mid(src_weight)
@@ -1310,14 +1463,45 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
     weight_diff = abs(sw - cw) if sw is not None and cw is not None else 999
 
     src_context = str(single.get("group_clean", "") or single.get("entry_clean", "") or "")
-    juv_to_adult = is_juvenile_16_17(src_age, src_context) and is_adult_age(tgt_age)
-    # Juvenile 16-17 → Adult is one practical age step (Adult starts at 18).
+    # Organizer option: Juvenile 16-17 → Adult counts as one practical age step
+    # (Adult starts at 18). It is still checked against max_safe_age_diff.
+    juv_to_adult = (
+        bool(settings.get("juvenile_adult_step_up"))
+        and is_juvenile_16_17(src_age, src_context)
+        and is_adult_age(tgt_age)
+    )
     age_diff = 1 if juv_to_adult else raw_age_diff
+
+    # Data completeness is separate from rule eligibility and preference score.
+    # Missing required information can never be labelled Safe.
+    data_gaps = []
+    if sw is None or cw is None:
+        data_gaps.append("weight class missing")
+    if skill_diff == 999:
+        data_gaps.append("skill/belt missing")
+    if raw_age_diff == 999 and not juv_to_adult:
+        data_gaps.append("age group missing")
+    if age_requires_gender_separation(src_age) or age_requires_gender_separation(tgt_age):
+        src_mixed = is_explicitly_mixed_gender_label(single.get("group_clean", "")) or \
+            is_explicitly_mixed_gender_label(src_age)
+        tgt_mixed = is_explicitly_mixed_gender_label(cand.get("group", "")) or \
+            is_explicitly_mixed_gender_label(tgt_age)
+        src_unknown = not single_gender and not src_mixed
+        tgt_unknown = not cand_gender and not tgt_mixed
+        # Unknown ≠ compatible. Flag when one side is gendered and the other is
+        # not, or when this file does encode gender elsewhere but not here. A
+        # file with no gender anywhere is reported once by the import check.
+        event_has_gender = bool(settings.get("event_has_gender_data", False))
+        asymmetric = (src_unknown and bool(cand_gender)) or (tgt_unknown and bool(single_gender))
+        if asymmetric or (event_has_gender and (src_unknown or tgt_unknown)):
+            data_gaps.append("gender not stated for a gender-separated division")
 
     score = 100
     reasons = []
     breakdown = ["Start: 100"]
     safety_flags = []
+    if skill_note:
+        reasons.append(skill_note)
 
     if not same_entry(single.get("entry_clean", ""), cand.get("entry", "")):
         penalty = settings["entry_crossover_penalty"]
@@ -1328,7 +1512,7 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
     if weight_diff == 999:
         penalty = settings["unknown_weight_penalty"]
         score -= penalty
-        reasons.append("unknown weight difference")
+        reasons.append("weight class missing — verify before matching")
         breakdown.append(f"Unknown weight: -{penalty}")
     elif weight_diff == 0:
         reasons.append("same weight class")
@@ -1357,7 +1541,10 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
     if weight_diff != 999 and weight_diff > settings["max_safe_weight_diff"]:
         safety_flags.append(f"Weight gap over {settings['max_safe_weight_diff']} lbs")
 
-    if skill_diff == 0:
+    if skill_diff == 999:
+        reasons.append("skill/belt missing — verify before matching")
+        breakdown.append("Unknown skill/belt: 0 (flagged for data review)")
+    elif skill_diff == 0:
         reasons.append("same skill/belt")
         breakdown.append("Skill/Belt: 0")
     elif skill_diff == 1:
@@ -1379,14 +1566,17 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
     if skill_diff != 999 and skill_diff > settings["max_safe_skill_diff"]:
         safety_flags.append(f"Skill gap over {settings['max_safe_skill_diff']} level(s)")
 
-    if age_diff == 0:
+    if age_diff == 999:
+        reasons.append("age group missing — verify before matching")
+        breakdown.append("Unknown age: 0 (flagged for data review)")
+    elif age_diff == 0:
         reasons.append("same age group")
         breakdown.append("Age: 0")
     elif juv_to_adult:
         # Same ballpark as a normal one-age-group step (Adult starts at 18).
         penalty = settings["one_age_penalty"]
         score -= penalty
-        reasons.append("Juvenile 16-17 into Adult (normal step up)")
+        reasons.append("Juvenile 16-17 into Adult (organizer step-up rule — confirm approval)")
         breakdown.append(f"Juvenile→Adult age step: -{penalty}")
     elif age_diff == 1:
         penalty = settings["one_age_penalty"]
@@ -1404,8 +1594,8 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
         reasons.append("major age group jump")
         breakdown.append(f"Major age group jump: -{penalty}")
 
-    # Juvenile→Adult is an expected step; do not hard-block on age safety limit.
-    if (not juv_to_adult) and age_diff != 999 and age_diff > settings["max_safe_age_diff"]:
+    # The Juvenile→Adult step counts as 1 and is still subject to the configured limit.
+    if age_diff != 999 and age_diff > settings["max_safe_age_diff"]:
         safety_flags.append(f"Age gap over {settings['max_safe_age_diff']} group(s)")
 
     # Director preference (Juvenile 16-17 → Adult):
@@ -1413,9 +1603,10 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
     # - Prefer same-weight Adult over heavier; lighter Adult is acceptable
     # - Adult options should beat a 20 lb Juvenile jump, but not a 10 lb Juvenile jump
     if juv_to_adult:
-        src_sv = skill_value(src_skill)
-        tgt_sv = skill_value(tgt_skill)
-        if src_sv != 999 and tgt_sv != 999 and tgt_sv < src_sv and (src_sv - tgt_sv) <= 1:
+        _s_lad, src_sv = skill_rank(src_skill, src_age)
+        _t_lad, tgt_sv = skill_rank(tgt_skill, tgt_age)
+        same_ladder = _s_lad is not None and _s_lad == _t_lad
+        if same_ladder and tgt_sv < src_sv and (src_sv - tgt_sv) <= 1:
             # Moving into a slightly easier Adult skill is intentional — do not
             # keep the normal one-level skill penalty.
             if skill_diff == 1:
@@ -1461,12 +1652,12 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
 
         # White Youth into a higher belt: prefer ~10 lb advantage, then same weight,
         # then heavier (still after all same-belt weight options).
-        src_sv = skill_value(src_skill)
-        tgt_sv = skill_value(tgt_skill)
+        _s_lad, src_sv = skill_rank(src_skill, src_age)
+        _t_lad, tgt_sv = skill_rank(tgt_skill, tgt_age)
         if (
             is_white_belt_skill(src_skill)
-            and src_sv != 999
-            and tgt_sv != 999
+            and _s_lad is not None
+            and _s_lad == _t_lad
             and tgt_sv > src_sv
             and sw is not None
             and cw is not None
@@ -1523,8 +1714,12 @@ def score_candidate(single, cand, allow_entry_crossover=False, scoring_settings=
 
     score = max(0, min(100, int(round(score))))
     safety_flag = "; ".join(safety_flags)
+    data_gap_text = "; ".join(data_gaps)
 
-    return score, "; ".join(reasons), " | ".join(breakdown), safety_flag, weight_diff, age_diff, skill_diff, academy_warning, academy_mix
+    return (
+        score, "; ".join(reasons), " | ".join(breakdown), safety_flag,
+        weight_diff, age_diff, skill_diff, academy_warning, academy_mix, data_gap_text,
+    )
 
 
 def _academy_lookup_from_df(df):
@@ -1563,13 +1758,11 @@ def make_recommendations(
     allow_entry_crossover=False,
     scoring_settings=None,
 ):
-    working = df.copy()
+    working = apply_approved_filter(df.copy(), only_approved)
     academy_lookup = _academy_lookup_from_df(df)
-
-    if only_approved and "approved_clean" in working.columns:
-        approved_mask = working["approved_clean"].astype(str).str.lower().eq("approved")
-        if approved_mask.any():
-            working = working[approved_mask]
+    if working.empty:
+        return pd.DataFrame()
+    scoring_settings = with_event_context(scoring_settings, df)
 
     summary = group_summary(working)
     singles_groups = summary[summary["athletes"] == 1]["group"].tolist()
@@ -1588,13 +1781,14 @@ def make_recommendations(
             if result is None:
                 continue
 
-            score, why, breakdown, safety_flag, weight_diff, age_diff, skill_diff, academy_warning, academy_mix = result
+            (score, why, breakdown, safety_flag, weight_diff, age_diff, skill_diff,
+             academy_warning, academy_mix, data_gaps) = result
 
-            risk = risk_badge(score, safety_flag)
+            risk = risk_badge(score, safety_flag, data_gaps)
             scored.append({
                 "Rank": 0,
                 "Athlete": single["athlete_name"],
-                "Quality": quality_label(score, safety_flag),
+                "Quality": quality_label(score, safety_flag, data_gaps),
                 "Risk Badge": risk,
                 "Action Plan": action_text("single", group, cand["group"], risk),
                 "Match Score": score,
@@ -1603,6 +1797,7 @@ def make_recommendations(
                 "Before / After": before_after_text(group, 1, cand["group"], cand["athletes"]),
                 "Target Athletes": cand["athletes"],
                 "Safety Flag": safety_flag,
+                "Data Gaps": data_gaps,
                 "Academy Warning": academy_warning,
                 "Academy Mix": academy_mix,
                 "Weight Difference": round(weight_diff, 1) if weight_diff != 999 else "",
@@ -1633,7 +1828,7 @@ def make_recommendations(
     first_cols = [
         "Rank", "Athlete", "Quality", "Risk Badge", "Action Plan", "Match Score",
         "Current Division", "Suggested Division", "Before / After", "Target Athletes",
-        "Safety Flag", "Academy Warning", "Academy Mix", "Weight Difference",
+        "Safety Flag", "Data Gaps", "Academy Warning", "Academy Mix", "Weight Difference",
         "Age Difference", "Skill Difference", "Scoring Breakdown", "Why",
     ]
     rest = [c for c in recs.columns if c not in first_cols]
@@ -1661,13 +1856,11 @@ def make_academy_conflict_recommendations(
     allow_entry_crossover=False,
     scoring_settings=None,
 ):
-    working = df.copy()
+    working = apply_approved_filter(df.copy(), only_approved)
     academy_lookup = _academy_lookup_from_df(df)
-
-    if only_approved and "approved_clean" in working.columns:
-        approved_mask = working["approved_clean"].astype(str).str.lower().eq("approved")
-        if approved_mask.any():
-            working = working[approved_mask]
+    if working.empty:
+        return pd.DataFrame()
+    scoring_settings = with_event_context(scoring_settings, df)
 
     summary = group_summary(working)
     # Use full-file academy counts so a division isn't flagged as academy-only
@@ -1694,7 +1887,8 @@ def make_academy_conflict_recommendations(
             if result is None:
                 continue
 
-            score, why, breakdown, safety_flag, weight_diff, age_diff, skill_diff, academy_warning, academy_mix = result
+            (score, why, breakdown, safety_flag, weight_diff, age_diff, skill_diff,
+             academy_warning, academy_mix, data_gaps) = result
             if int(cand_for_score.get("academy_count", 0)) >= 2:
                 score = min(100, score + 8)
                 why = why + "; target already has mixed academies"
@@ -1704,11 +1898,11 @@ def make_academy_conflict_recommendations(
                 why = why + "; target is also same-academy or missing academy variety"
                 breakdown = breakdown + " | Target lacks academy variety: -10"
 
-            risk = risk_badge(score, safety_flag)
+            risk = risk_badge(score, safety_flag, data_gaps)
             scored.append({
                 "Rank": 0,
                 "Issue": "All same academy",
-                "Quality": quality_label(score, safety_flag),
+                "Quality": quality_label(score, safety_flag, data_gaps),
                 "Risk Badge": risk,
                 "Action Plan": action_text("conflict", problem["group"], cand["group"], risk),
                 "Match Score": score,
@@ -1720,6 +1914,7 @@ def make_academy_conflict_recommendations(
                 "Problem Academy": problem["academies"],
                 "Academy Mix After Merge": academy_mix,
                 "Safety Flag": safety_flag,
+                "Data Gaps": data_gaps,
                 "Weight Difference": round(weight_diff, 1) if weight_diff != 999 else "",
                 "Age Difference": age_diff if age_diff != 999 else "",
                 "Skill Difference": skill_diff if skill_diff != 999 else "",
@@ -1751,7 +1946,7 @@ def make_academy_conflict_recommendations(
         "Rank", "Issue", "Quality", "Risk Badge", "Action Plan", "Match Score",
         "Problem Division", "Suggested Division", "Before / After", "Problem Athletes",
         "Target Athletes", "Problem Academy", "Academy Mix After Merge",
-        "Safety Flag", "Weight Difference", "Age Difference", "Skill Difference",
+        "Safety Flag", "Data Gaps", "Weight Difference", "Age Difference", "Skill Difference",
         "Scoring Breakdown", "Why",
     ]
     rest = [c for c in recs.columns if c not in first_cols]
@@ -1766,6 +1961,8 @@ def style_quality_rows(df):
 
         if safety or "do not match" in quality:
             color = "#fca5a5"
+        elif "needs data" in quality:
+            color = "#fde68a"
         elif "all same academy" in warning:
             color = "#fecaca"
         elif "excellent" in quality:
@@ -1818,7 +2015,7 @@ def to_excel_bytes(recommendations, singles, summary, academy_conflicts=None):
     action_plan = build_action_plan(recommendations, academy_conflicts)
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         if not action_plan.empty:
-            action_plan.to_excel(writer, index=False, sheet_name="Action Plan")
+            action_plan.to_excel(writer, index=False, sheet_name="Recommendation report")
         recommendations.to_excel(writer, index=False, sheet_name="Recommendations")
         if academy_conflicts is not None and not academy_conflicts.empty:
             academy_conflicts.to_excel(writer, index=False, sheet_name="Academy Conflicts")
@@ -1936,16 +2133,23 @@ def format_action_plan_text(moves):
     if not active:
         return ""
     lines = [
-        "EZ Brackets — Action Plan",
+        "EZ Brackets — Action Plan (accepted actions only)",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"Total moves: {len(active)}",
+        f"Total actions: {len(active)} (one line per athlete)",
         "",
     ]
     for i, m in enumerate(active, 1):
-        lines.append(f"{i}. Move {m['athlete_name']}")
-        lines.append(f"   FROM: {m['original_division']}")
-        lines.append(f"   TO:   {m['new_division']}")
+        verb = "Copy" if move_apply_method(m) == "copy" else "Move"
+        lines.append(f"{i}. {verb} {m['athlete_name']}")
+        if verb == "Copy":
+            lines.append(f"   KEEP IN: {m['original_division']}")
+            lines.append(f"   COPY TO: {m['new_division']}")
+        else:
+            lines.append(f"   FROM: {m['original_division']}")
+            lines.append(f"   TO:   {m['new_division']}")
         lines.append(f"   Score: {m['score']}")
+        if m.get("group_action_id"):
+            lines.append("   Part of a whole-division action")
         if m.get("academy_warning"):
             lines.append(f"   ⚠️  {m['academy_warning']}")
         if m.get("director_notes"):
@@ -1966,6 +2170,10 @@ def migrate_moves_applied_fields(moves):
             continue
         m.setdefault("applied", False)
         m.setdefault("applied_at", "")
+        m.setdefault("kind", "single")
+        m.setdefault("group_action_id", "")
+        # Older sessions were recorded when planned counts assumed a true move.
+        m.setdefault("apply_method", "move")
     return moves
 
 
@@ -2257,7 +2465,8 @@ def render_apply_to_smoothcomp(moves, *, expanded=True, key_prefix="apply"):
             st.markdown(
                 f'<div class="ez-apply-next">'
                 f'<div class="ez-apply-athlete">{_next["athlete_name"]}</div>'
-                f'<p class="ez-apply-path">KEEP / FROM: {_next["original_division"]}</p>'
+                f'<p class="ez-apply-path">{"KEEP / FROM" if move_apply_method(_next) == "copy" else "REMOVE FROM"}: '
+                f'{_next["original_division"]}</p>'
                 f'<p class="ez-apply-to">COPY INTO: {_next["new_division"]}</p>'
                 f'<p class="ez-apply-why">{format_apply_why(_next)}</p>'
                 f"</div>",
@@ -2296,7 +2505,7 @@ def render_apply_to_smoothcomp(moves, *, expanded=True, key_prefix="apply"):
                 _parts = smoothcomp_copy_fields(_m.get("new_division", ""))
                 st.markdown(
                     f"**{_mi + 1}. {_m['athlete_name']}**  \n"
-                    f"KEEP: `{_m['original_division']}`  \n"
+                    f"{'KEEP' if move_apply_method(_m) == 'copy' else 'REMOVE FROM'}: `{_m['original_division']}`  \n"
                     f"COPY INTO: `{_m['new_division']}`  \n"
                     f"Dropdowns: `{_parts['entry']}` · `{_parts['skill']}` · "
                     f"`{_parts['age']}` · `{_parts['weight']}`  \n"
@@ -2446,6 +2655,16 @@ def trust_summary(rec_row):
             "lines": ["Blocked by current safety rules."] + clean_lines[:3],
         }
 
+    data_gaps = str(rec_row.get("Data Gaps", "") or "").strip()
+    if data_gaps or wd is None or sd is None or ad is None:
+        gap_lines = [g.strip().capitalize() for g in data_gaps.split(";") if g.strip()]
+        return {
+            "state": "review",
+            "title": "Missing information",
+            "lines": (gap_lines or ["Required division data is missing."])
+            + ["Score is a preference only — not a safety rating.", "Verify in Smoothcomp before moving."],
+        }
+
     # One weight class apart can still be Looks Safe; age/skill gaps or academy warnings need review.
     aw_low = aw.lower()
     needs_review = (
@@ -2509,12 +2728,19 @@ def active_moves_only(moves):
     return [m for m in (moves or []) if m.get("status") == "Active"]
 
 
-def planned_athlete_counts(summary_df, moves):
-    """Project division sizes after Active moves (CSV unchanged).
+def move_apply_method(move):
+    """'copy' (keep original registration) or 'move' (remove from original)."""
+    method = str((move or {}).get("apply_method", "") or "").strip().lower()
+    return "move" if method == "move" else "copy"
 
-    Each Active move removes one athlete from ``original_division`` and adds one
-    to ``new_division``. Used so accepting A→B (two singles) clears both from
-    the unresolved single queue without inventing a second Action Plan row.
+
+def planned_athlete_counts(summary_df, moves):
+    """Project Smoothcomp division sizes after Active actions (CSV unchanged).
+
+    One record = one athlete. A *move* removes the athlete from
+    ``original_division`` and adds them to ``new_division``. A *copy* keeps the
+    original registration, so only the destination grows — matching what staff
+    actually see in Smoothcomp after Copy registrations.
     """
     counts = {}
     if summary_df is not None and not summary_df.empty:
@@ -2523,27 +2749,69 @@ def planned_athlete_counts(summary_df, moves):
     for m in active_moves_only(moves):
         src = str(m.get("original_division", "") or "").strip()
         dst = str(m.get("new_division", "") or "").strip()
-        if src:
+        if src and move_apply_method(m) == "move":
             counts[src] = max(0, int(counts.get(src, 0)) - 1)
         if dst:
             counts[dst] = int(counts.get(dst, 0)) + 1
     return counts
 
 
-def filter_planned_singles(singles_df, planned_counts):
-    """Keep only divisions that are still alone after planned moves."""
+def planned_handled_groups(moves):
+    """Source divisions that already have an Active planned action.
+
+    After a *copy* the athlete still sits alone in the original division in
+    Smoothcomp, but they have a proposed opponent elsewhere — so the division
+    is handled, not still open.
+    """
+    return {
+        str(m.get("original_division", "") or "").strip()
+        for m in active_moves_only(moves)
+        if str(m.get("original_division", "") or "").strip()
+    }
+
+
+def filter_planned_singles(singles_df, planned_counts, handled_groups=None):
+    """Keep only divisions that are still alone AND have no planned action."""
     if singles_df is None or singles_df.empty:
         return singles_df
-    mask = singles_df["group"].astype(str).map(lambda g: int(planned_counts.get(g, 0)) == 1)
+    handled = set(handled_groups or set())
+    mask = singles_df["group"].astype(str).map(
+        lambda g: int(planned_counts.get(g, 0)) == 1 and g not in handled
+    )
     return singles_df.loc[mask].copy()
 
 
-def filter_planned_conflict_groups(conflict_df, planned_counts):
-    """Drop academy-conflict groups that no longer have 2+ planned athletes."""
+def filter_planned_conflict_groups(conflict_df, planned_counts, handled_groups=None):
+    """Drop academy-conflict groups that are resolved or already have a planned action."""
     if conflict_df is None or conflict_df.empty:
         return conflict_df
-    mask = conflict_df["group"].astype(str).map(lambda g: int(planned_counts.get(g, 0)) >= 2)
+    handled = set(handled_groups or set())
+    mask = conflict_df["group"].astype(str).map(
+        lambda g: int(planned_counts.get(g, 0)) >= 2 and g not in handled
+    )
     return conflict_df.loc[mask].copy()
+
+
+def athletes_in_group(df, group):
+    """Athlete names registered in ``group`` (one entry per registration)."""
+    if df is None or df.empty or "group_clean" not in df.columns:
+        return []
+    rows = df[df["group_clean"].astype(str) == str(group)]
+    return [str(n) for n in rows["athlete_name"].astype(str).tolist()]
+
+
+def revert_move(moves, idx):
+    """Revert one action. Group actions (same ``group_action_id``) revert together."""
+    if idx is None or idx < 0 or idx >= len(moves):
+        return 0
+    gid = str(moves[idx].get("group_action_id", "") or "")
+    reverted = 0
+    for m in moves:
+        if m is moves[idx] or (gid and str(m.get("group_action_id", "") or "") == gid):
+            if m.get("status") == "Active":
+                m["status"] = "Reverted"
+                reverted += 1
+    return reverted
 
 
 def build_decision_queue(
@@ -2582,7 +2850,7 @@ def build_decision_queue(
         )
         has_rec = not rec_rows.empty
         best = rec_rows.iloc[0] if has_rec else None
-        safe = bool(has_rec and str(best.get("Safety Flag", "")).strip() == "")
+        safe = recommendation_is_safe(best) if has_rec else False
         pi = pending_impacts.get(group, {})
         if safe and pi.get("impact") != "resolves":
             priority = 1
@@ -2619,7 +2887,7 @@ def build_decision_queue(
         )
         has_rec = not rec_rows.empty
         best = rec_rows.iloc[0] if has_rec else None
-        safe = bool(has_rec and str(best.get("Safety Flag", "")).strip() == "")
+        safe = recommendation_is_safe(best) if has_rec else False
         priority = 1 if safe else 3
         items.append({
             "id": did,
@@ -2643,7 +2911,18 @@ def build_decision_queue(
     return active_items + skipped_items
 
 
-def append_accepted_move(athlete_name, original_division, new_division, score, academy_warning=""):
+def append_accepted_move(
+    athlete_name,
+    original_division,
+    new_division,
+    score,
+    academy_warning="",
+    *,
+    kind="single",
+    group_action_id="",
+    apply_method=None,
+):
+    method = apply_method or st.session_state.get("apply_method", "copy")
     st.session_state.setdefault("moves", []).append({
         "athlete_name": athlete_name,
         "original_division": original_division,
@@ -2655,7 +2934,28 @@ def append_accepted_move(athlete_name, original_division, new_division, score, a
         "status": "Active",
         "applied": False,
         "applied_at": "",
+        "kind": kind,
+        "group_action_id": group_action_id or "",
+        "apply_method": "move" if str(method).lower() == "move" else "copy",
     })
+
+
+def append_group_move(athlete_names, original_division, new_division, score, academy_warning=""):
+    """Accept a whole-division action as one record per athlete.
+
+    Storing ``"a, b, c"`` as a single athlete made headcounts and the staff
+    checklist disagree with the recommendation. Each athlete becomes a task.
+    """
+    names = [str(n).strip() for n in (athlete_names or []) if str(n).strip()]
+    if not names:
+        return 0
+    gid = f"grp-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    for name in names:
+        append_accepted_move(
+            name, original_division, new_division, score, academy_warning,
+            kind="conflict", group_action_id=gid,
+        )
+    return len(names)
 
 
 def build_session_payload():
@@ -2679,11 +2979,44 @@ def build_session_payload():
         "apply_public_note_template": st.session_state.get(
             "apply_public_note_template", DEFAULT_PUBLIC_NOTE
         ),
+        "apply_method": st.session_state.get("apply_method", "copy"),
+        "rules": collect_rule_settings(),
         "active_moves": len(active),
         "skipped_count": len(skipped),
         "manual_count": len(manual),
         "applied_count": sum(1 for m in active if m.get("applied")),
     }
+
+
+RULE_SETTING_KEYS = (
+    "set_only_approved", "set_min_target_size", "set_top_n", "set_allow_entry_crossover",
+    "set_max_safe_weight_diff", "set_max_safe_age_diff", "set_max_safe_skill_diff",
+    "set_juvenile_adult_step_up", "set_same_academy_penalty", "set_entry_crossover_penalty",
+)
+
+
+def collect_rule_settings():
+    """Snapshot every rule/filter widget so a restored session reproduces the same decisions."""
+    out = {}
+    for k in RULE_SETTING_KEYS:
+        if k in st.session_state:
+            v = st.session_state[k]
+            out[k] = bool(v) if isinstance(v, bool) else v
+    return out
+
+
+def restore_rule_settings(rules, preset_name=""):
+    """Apply saved rule values; mark them as seeded so the preset does not overwrite them."""
+    if not isinstance(rules, dict):
+        return False
+    applied = False
+    for k in RULE_SETTING_KEYS:
+        if k in rules:
+            st.session_state[k] = rules[k]
+            applied = True
+    if applied and preset_name:
+        st.session_state["_rules_seeded_for_preset"] = preset_name
+    return applied
 
 
 def session_has_progress():
@@ -2745,10 +3078,14 @@ def apply_restored_session(result):
     st.session_state["smoothcomp_event_url"] = str(result.get("smoothcomp_event_url", "") or "")
     _pub = str(result.get("apply_public_note_template", "") or "").strip()
     st.session_state["apply_public_note_template"] = _pub or DEFAULT_PUBLIC_NOTE
+    _method = str(result.get("apply_method", "") or "").strip().lower()
+    if _method in ("copy", "move"):
+        st.session_state["apply_method"] = _method
     saved_preset = result.get("last_preset", "")
     if saved_preset in SCORING_PRESETS:
         st.session_state["rule_preset_select"] = saved_preset
         st.session_state["last_preset"] = saved_preset
+    restore_rule_settings(result.get("rules"), saved_preset if saved_preset in SCORING_PRESETS else "")
     saved_view = result.get("view_mode", "")
     # Migrate legacy Table Mode label
     if saved_view == "📋 Table Mode":
@@ -2812,6 +3149,36 @@ def check_move_back_alerts(moves, current_summary):
                 "Review in the Move Log below."
             )
     return alerts
+
+
+def reconcile_moves_with_file(moves, df):
+    """Compare planned actions with a (new) registration file.
+
+    Returns dict with ``matched`` (athlete still registered in original division),
+    ``missing_athlete`` (athlete not found anywhere), ``missing_division``
+    (original division no longer in file), ``already_in_destination``.
+    """
+    out = {"matched": [], "missing_athlete": [], "missing_division": [], "already_in_destination": []}
+    if df is None or df.empty or "group_clean" not in df.columns:
+        return out
+    groups = set(df["group_clean"].astype(str))
+    pairs = set(zip(df["athlete_name"].astype(str), df["group_clean"].astype(str)))
+    names = set(df["athlete_name"].astype(str))
+    for m in active_moves_only(moves):
+        name = str(m.get("athlete_name", ""))
+        src = str(m.get("original_division", ""))
+        dst = str(m.get("new_division", ""))
+        if (name, dst) in pairs:
+            out["already_in_destination"].append(m)
+        elif (name, src) in pairs:
+            out["matched"].append(m)
+        elif name not in names:
+            out["missing_athlete"].append(m)
+        elif src not in groups:
+            out["missing_division"].append(m)
+        else:
+            out["matched"].append(m)
+    return out
 
 
 def metric_card(label, value, help_text):
@@ -3075,36 +3442,71 @@ if data_ready:
         )
         preset = SCORING_PRESETS[rule_preset]
 
+        # When the preset changes, reseed the rule widgets from that preset.
+        if st.session_state.get("_rules_seeded_for_preset") != rule_preset:
+            st.session_state["set_max_safe_weight_diff"] = preset["max_safe_weight_diff"]
+            st.session_state["set_max_safe_age_diff"] = preset["max_safe_age_diff"]
+            st.session_state["set_max_safe_skill_diff"] = preset["max_safe_skill_diff"]
+            st.session_state["set_same_academy_penalty"] = preset["same_academy_penalty"]
+            st.session_state["set_entry_crossover_penalty"] = preset["entry_crossover_penalty"]
+            st.session_state["set_juvenile_adult_step_up"] = bool(preset.get("juvenile_adult_step_up", False))
+            st.session_state["_rules_seeded_for_preset"] = rule_preset
+        st.session_state.setdefault("set_only_approved", True)
+        st.session_state.setdefault("set_min_target_size", 1)
+        st.session_state.setdefault("set_top_n", 3)
+        st.session_state.setdefault("set_allow_entry_crossover", False)
+        st.session_state.setdefault("apply_method", "copy")
+
+        st.radio(
+            "How do you apply changes in Smoothcomp?",
+            ["copy", "move"],
+            key="apply_method",
+            format_func=lambda v: "Copy — keep the original registration" if v == "copy" else "Move — remove from original",
+            horizontal=False,
+            help=(
+                "Copy leaves the athlete in the original division too (so a late sign-up can still "
+                "match them there). Planned counts follow whichever you pick."
+            ),
+        )
+
         with st.expander("Safety settings (optional)", expanded=False):
             st.caption("Most directors can leave these on the preset defaults.")
-            only_approved = st.checkbox("Only analyze approved athletes", value=True)
+            only_approved = st.checkbox("Only analyze approved athletes", key="set_only_approved")
             min_target_size = st.selectbox(
                 "Suggest moving alone athletes into groups with at least:",
                 [1, 2, 3],
-                index=0,
+                key="set_min_target_size",
             )
-            top_n = st.slider("Top suggestions per alone athlete", min_value=1, max_value=5, value=3)
-            allow_entry_crossover = st.checkbox("Show Gi/No-Gi crossover emergency options", value=False)
+            top_n = st.slider("Top suggestions per alone athlete", min_value=1, max_value=5, key="set_top_n")
+            allow_entry_crossover = st.checkbox(
+                "Show Gi/No-Gi crossover emergency options", key="set_allow_entry_crossover"
+            )
             max_safe_weight_diff = st.slider(
                 "Do Not Match if weight gap is over (lbs):",
-                5, 60, preset["max_safe_weight_diff"], 5,
-                help="Weight difference in pounds. Larger gaps are marked unsafe.",
+                5, 60, step=5, key="set_max_safe_weight_diff",
+                help="Weight difference in pounds (kg labels are converted). Larger gaps are marked unsafe.",
             )
             max_safe_age_diff = st.slider(
                 "Do Not Match if age gap is over (age groups):",
-                0, 5, preset["max_safe_age_diff"],
+                0, 5, key="set_max_safe_age_diff",
                 help="0 means only the same age group is allowed (best for kids).",
             )
             max_safe_skill_diff = st.slider(
                 "Do Not Match if skill/belt gap is over:",
-                0, 5, preset["max_safe_skill_diff"],
+                0, 5, key="set_max_safe_skill_diff",
+            )
+            juvenile_adult_step_up = st.checkbox(
+                "Count Juvenile 16–17 → Adult as one age step (organizer rule)",
+                key="set_juvenile_adult_step_up",
+                help=(
+                    "Freestyle Grapplerz practice: a 16–17 athlete stepping into Adult is one age step "
+                    "because Adult starts at 18. Still checked against the age-gap limit above, and "
+                    "always shown as Needs Review so approval is visible."
+                ),
             )
             st.markdown("**Advanced scoring weights**")
-            same_academy_penalty = st.slider("Same-academy penalty", 0, 60, preset["same_academy_penalty"], 5)
-            entry_crossover_penalty = st.slider("Gi/No-Gi crossover penalty", 0, 60, preset["entry_crossover_penalty"], 5)
-
-        # Defaults when expander values are first created — Streamlit still executes expander body
-        # so variables above are always defined.
+            same_academy_penalty = st.slider("Same-academy penalty", 0, 60, step=5, key="set_same_academy_penalty")
+            entry_crossover_penalty = st.slider("Gi/No-Gi crossover penalty", 0, 60, step=5, key="set_entry_crossover_penalty")
 
     scoring_settings = {
         "max_safe_weight_diff": max_safe_weight_diff,
@@ -3112,13 +3514,36 @@ if data_ready:
         "max_safe_skill_diff": max_safe_skill_diff,
         "same_academy_penalty": same_academy_penalty,
         "entry_crossover_penalty": entry_crossover_penalty,
+        "juvenile_adult_step_up": bool(juvenile_adult_step_up),
     }
 
-    working_df = df.copy()
-    if only_approved and "approved_clean" in df.columns:
-        approved_df = df[df["approved_clean"].astype(str).str.lower().eq("approved")]
-        if not approved_df.empty:
-            working_df = approved_df
+    working_df = apply_approved_filter(df.copy(), only_approved)
+    if working_df.empty:
+        st.warning(
+            "**Only analyze approved athletes** is on, and this file has 0 approved registrations. "
+            "Nothing was analysed. Turn that setting off in the sidebar (Safety settings) to review "
+            "pending registrations, or upload a file with approved athletes."
+        )
+        st.stop()
+
+    # Import check: weight units. kg labels are converted to lbs; unit-less labels are assumed lbs.
+    _weights_seen = df["weight_clean"].astype(str).str.strip() if "weight_clean" in df.columns else pd.Series([], dtype=str)
+    _weights_seen = _weights_seen[_weights_seen.ne("")].drop_duplicates()
+    _kg_n = int(sum(1 for w in _weights_seen if weight_unit(w) == "kg"))
+    _unitless_n = int(sum(1 for w in _weights_seen if weight_unit(w) == "" and re.search(r"\d", w)))
+    if _kg_n or _unitless_n:
+        _unit_bits = []
+        if _kg_n:
+            _unit_bits.append(f"{_kg_n} weight class label(s) use kg — converted to lbs for all comparisons")
+        if _unitless_n:
+            _unit_bits.append(f"{_unitless_n} weight class label(s) have no unit — treated as lbs")
+        st.info("Import check — weight units: " + "; ".join(_unit_bits) + ".")
+    if not event_has_gender_data(df):
+        st.info(
+            "Import check — gender: no division in this file states a gender (Male/Female, Men/Women). "
+            "EZ Brackets cannot check gender for Teen/Adult/Masters suggestions here — confirm your "
+            "event does not split genders, or verify each move in Smoothcomp."
+        )
 
     summary = group_summary(working_df)
     full_summary = group_summary(df)
@@ -3128,17 +3553,61 @@ if data_ready:
             st.session_state["move_back_alerts"] = check_move_back_alerts(
                 st.session_state["moves"], summary
             )
+            if active_moves_only(st.session_state["moves"]):
+                st.session_state["pending_file_decision"] = True
         else:
             st.session_state["move_back_alerts"] = []
+
+    # A different CSV arrived while actions exist: make the director choose.
+    if st.session_state.get("pending_file_decision") and active_moves_only(st.session_state.get("moves", [])):
+        _rec = reconcile_moves_with_file(st.session_state["moves"], df)
+        _n_active = len(active_moves_only(st.session_state["moves"]))
+        st.warning(
+            f"A new registration file was loaded while **{_n_active}** planned action(s) exist. "
+            "Is this an updated export of the **same event**, or a **different event**?"
+        )
+        _pv1, _pv2 = st.columns(2)
+        with _pv1:
+            st.markdown(
+                f"- Still match this file: **{len(_rec['matched'])}**  \n"
+                f"- Already in destination (copy/move done): **{len(_rec['already_in_destination'])}**  \n"
+                f"- Athlete not found in file: **{len(_rec['missing_athlete'])}**  \n"
+                f"- Original division no longer in file: **{len(_rec['missing_division'])}**"
+            )
+        with _pv2:
+            _unmatched = _rec["missing_athlete"] + _rec["missing_division"]
+            if _unmatched:
+                with st.expander(f"Unmatched actions ({len(_unmatched)})", expanded=False):
+                    for m in _unmatched[:25]:
+                        st.caption(f"{m['athlete_name']} · {m['original_division']}")
+        _fd1, _fd2 = st.columns(2)
+        with _fd1:
+            if st.button("Same event — keep planned actions", key="file_decision_keep", type="primary"):
+                st.session_state["pending_file_decision"] = False
+                st.rerun()
+        with _fd2:
+            if st.button("Different event — start fresh (clear actions)", key="file_decision_reset"):
+                st.session_state["moves"] = []
+                st.session_state["guided_skipped"] = set()
+                st.session_state["manual_review"] = set()
+                st.session_state["focus_index"] = 0
+                st.session_state["move_back_alerts"] = []
+                st.session_state["pending_file_decision"] = False
+                st.rerun()
+        st.stop()
 
     # Original CSV-truth singles / conflicts (uploaded file never modified).
     csv_singles = summary[summary["athletes"] == 1].copy()
     csv_academy_conflict_groups = summary[(summary["athletes"] >= 2) & (summary["academy_count"] == 1)].copy()
 
-    # Planned event state = CSV + Active accepted moves (revert drops them back out).
+    # Planned event state = CSV + Active accepted actions (revert drops them back out).
+    # Copy keeps the original registration; the source division is still "handled".
     _planned_counts = planned_athlete_counts(summary, st.session_state.get("moves", []))
-    singles = filter_planned_singles(csv_singles, _planned_counts)
-    academy_conflict_groups = filter_planned_conflict_groups(csv_academy_conflict_groups, _planned_counts)
+    _handled_groups = planned_handled_groups(st.session_state.get("moves", []))
+    singles = filter_planned_singles(csv_singles, _planned_counts, _handled_groups)
+    academy_conflict_groups = filter_planned_conflict_groups(
+        csv_academy_conflict_groups, _planned_counts, _handled_groups
+    )
 
     recommendations = make_recommendations(
         df,
@@ -3362,17 +3831,24 @@ if data_ready:
         _plan_text = format_action_plan_text(st.session_state.get("moves", []))
         _apply_stats = apply_mode_stats(st.session_state.get("moves", []))
         st.markdown('<div class="ez-complete-panel">', unsafe_allow_html=True)
-        st.subheader("✅ Bracket Review Complete")
+        _all_applied = _apply_stats["planned"] > 0 and _apply_stats["remaining"] == 0
+        if _all_applied:
+            st.subheader("✅ Suggestions reviewed · all actions marked Applied")
+        else:
+            st.subheader("✅ Suggestions reviewed — Smoothcomp still needs your changes")
         st.markdown(
-            f"**{_active_moves_count}** moves planned · **{_skipped_count}** skipped · "
-            f"**{_manual_count}** manual review.  \n"
+            f"**{_active_moves_count}** action(s) planned · **{_skipped_count}** skipped · "
+            f"**{_manual_count}** manual review"
+            + (f" · **{_manual_count + _skipped_count}** still need a director decision" if (_manual_count + _skipped_count) else "")
+            + ".  \n"
             "EZ Brackets has **not** updated Smoothcomp. Use **Apply to Smoothcomp** below "
-            "to copy each move and mark it Applied, or download the Action Plan backup."
+            "to copy each action and mark it Applied, or download the Action Plan backup."
         )
         if _apply_stats["planned"]:
             st.caption(
-                f"Apply progress: {_apply_stats['applied']} applied · "
-                f"{_apply_stats['remaining']} remaining"
+                f"Readiness: suggestions reviewed ✔ · "
+                f"applied in Smoothcomp {_apply_stats['applied']}/{_apply_stats['planned']} · "
+                "verified against a fresh export: re-upload the CSV after applying to confirm."
             )
         _nb1, _nb2 = st.columns(2)
         with _nb1:
@@ -3486,13 +3962,25 @@ if data_ready:
                 rec_row.get("Academy Warning", "")
                 or rec_row.get("Academy Mix After Merge", "")
             )
-            append_accepted_move(
-                item["name"],
-                item["group"],
-                str(rec_row["Suggested Division"]),
-                int(rec_row["Match Score"]),
-                warning,
-            )
+            if item["kind"] == "conflict":
+                names = athletes_in_group(working_df, item["group"])
+                if not names:
+                    names = [n.strip() for n in str(item["name"]).split(",") if n.strip()]
+                append_group_move(
+                    names,
+                    item["group"],
+                    str(rec_row["Suggested Division"]),
+                    int(rec_row["Match Score"]),
+                    warning,
+                )
+            else:
+                append_accepted_move(
+                    item["name"],
+                    item["group"],
+                    str(rec_row["Suggested Division"]),
+                    int(rec_row["Match Score"]),
+                    warning,
+                )
             st.session_state["guided_skipped"].discard(item["id"])
             st.session_state["manual_review"].discard(item["id"])
             st.rerun()
@@ -3529,30 +4017,58 @@ if data_ready:
                         st.rerun()
 
             if not safe:
+                _data_gaps = str(best.get("Data Gaps", "") or "").strip() if has_rec else ""
+                _rule_blocked = bool(has_rec and str(best.get("Safety Flag", "") or "").strip())
+                _missing_only = bool(has_rec and _data_gaps and not _rule_blocked)
                 st.markdown('<div class="ez-manual-banner">', unsafe_allow_html=True)
                 kind_label = "Academy conflict" if item["kind"] == "conflict" else "Alone athlete"
-                st.markdown(f"**⛔ No safe match** · {kind_label}: **{item['name']}**")
+                if _missing_only:
+                    st.markdown(f"**⚠️ Missing information** · {kind_label}: **{item['name']}**")
+                else:
+                    st.markdown(f"**⛔ No safe match** · {kind_label}: **{item['name']}**")
                 st.caption(item["group"])
                 if has_rec:
                     trust = trust_summary(best)
                     st.caption(f"{trust['title']}: {'; '.join(trust['lines'][:2])}")
+                    if _missing_only:
+                        st.caption(f"Suggested: {best['Suggested Division']}")
                 else:
                     st.caption("No recommendation could be generated for this division.")
-                b1, b2 = st.columns(2)
+                if _missing_only:
+                    b1, b2, b3 = st.columns(3)
+                else:
+                    b1, b2 = st.columns(2)
+                    b3 = None
                 with b1:
                     if st.button("Skip For Now", key=f"{key_prefix}_skip"):
                         # Keep focus index: skipped item moves to end, so same index becomes next.
                         st.session_state.setdefault("guided_skipped", set()).add(item["id"])
                         st.rerun()
                 with b2:
-                    if st.button("Mark for Manual Review", key=f"{key_prefix}_manual", type="primary"):
+                    if st.button(
+                        "Mark for Manual Review",
+                        key=f"{key_prefix}_manual",
+                        type="secondary" if _missing_only else "primary",
+                    ):
                         st.session_state.setdefault("manual_review", set()).add(item["id"])
                         st.session_state.get("guided_skipped", set()).discard(item["id"])
                         st.rerun()
+                if b3 is not None:
+                    with b3:
+                        if st.button(
+                            "Accept — I verified in Smoothcomp",
+                            key=f"{key_prefix}_accept_verified",
+                            type="primary",
+                            help="Only after confirming the missing weight/skill/age/gender data yourself.",
+                        ):
+                            _accept_item(item, best)
                 with st.expander("Details"):
                     if has_rec:
                         st.caption(str(best.get("Why", ""))[:240])
-                        st.caption(f"Safety Flag: {best.get('Safety Flag', '')}")
+                        if _rule_blocked:
+                            st.caption(f"Safety Flag: {best.get('Safety Flag', '')}")
+                        if _data_gaps:
+                            st.caption(f"Missing data: {_data_gaps}")
                     st.caption("Try a different rule preset in Safety settings if you want more options.")
                 st.markdown("</div>", unsafe_allow_html=True)
                 return
@@ -3610,11 +4126,13 @@ if data_ready:
                     alts = src[src[div_col] == item["group"]].sort_values("Rank")
                     for _, rr in alts.iterrows():
                         flag = str(rr.get("Safety Flag", "")).strip()
-                        lbl = (
-                            "⛔ Not safe"
-                            if flag
-                            else f"Option {int(rr['Rank'])} · {int(rr['Match Score'])} · {rr['Quality']}"
-                        )
+                        _gaps = str(rr.get("Data Gaps", "") or "").strip()
+                        if flag:
+                            lbl = "⛔ Not safe"
+                        elif _gaps:
+                            lbl = f"⚠️ Option {int(rr['Rank'])} · {int(rr['Match Score'])} · Missing info"
+                        else:
+                            lbl = f"Option {int(rr['Rank'])} · {int(rr['Match Score'])} · {rr['Quality']}"
                         st.markdown(f"**{lbl}** → {rr['Suggested Division']}")
                         st.caption(str(rr.get("Why", ""))[:140])
                         if not flag and int(rr["Rank"]) != 1:
@@ -3686,12 +4204,14 @@ if data_ready:
                         st.markdown(
                             f'<div class="ez-compact-row"><div><b>{m["athlete_name"]}</b> → {m["new_division"]}'
                             f'<br/><span style="color:#94a3b8;font-size:12px;">'
-                            f'from {m["original_division"]} · score {m["score"]}</span></div></div>',
+                            f'{"copy from" if move_apply_method(m) == "copy" else "move from"} '
+                            f'{m["original_division"]} · score {m["score"]}'
+                            f'{" · group action" if m.get("group_action_id") else ""}</span></div></div>',
                             unsafe_allow_html=True,
                         )
                     with r2:
                         if full_idx is not None and st.button("↩ Revert", key=f"g_revert_{full_idx}"):
-                            st.session_state["moves"][full_idx]["status"] = "Reverted"
+                            revert_move(st.session_state["moves"], full_idx)
                             st.rerun()
                     note = st.text_input(
                         "Note",
@@ -3728,7 +4248,7 @@ if data_ready:
         st.subheader("Event Summary")
         summary_cols = st.columns(4)
         with summary_cols[0]:
-            st.metric("Rank #1 Actions", len(action_plan))
+            st.metric("Rank #1 Suggestions", len(action_plan))
         with summary_cols[1]:
             st.metric("Safe Matches", int(high_confidence_count))
         with summary_cols[2]:
@@ -3737,7 +4257,7 @@ if data_ready:
             st.metric("Rule Preset", rule_preset)
         st.caption("Use this as a quick pre-bracket checklist before publishing divisions.")
         if not action_plan.empty:
-            with st.expander("Preview Director Action Plan", expanded=False):
+            with st.expander("Preview Recommendation report (top suggestion per division — not your accepted plan)", expanded=False):
                 st.dataframe(action_plan, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -3838,17 +4358,24 @@ if data_ready:
 
                 if not best_matches.empty:
                     st.divider()
+                    _gap_series = (
+                        best_matches["Data Gaps"].astype(str).str.strip()
+                        if "Data Gaps" in best_matches.columns
+                        else pd.Series([""] * len(best_matches), index=best_matches.index)
+                    )
                     _safe_best = best_matches[
                         best_matches["Safety Flag"].astype(str).str.strip().eq("")
                         & ~best_matches["Quality"].astype(str).eq("Do Not Match")
+                        & _gap_series.eq("")
                     ].copy()
                     _blocked_best = best_matches.loc[
                         ~best_matches.index.isin(_safe_best.index)
                     ]
                     if not _blocked_best.empty:
+                        _n_gap = int(_gap_series.loc[_blocked_best.index].ne("").sum())
                         st.caption(
-                            f"{len(_blocked_best)} recommendation(s) are marked Do Not Match / unsafe "
-                            "and cannot be accepted here."
+                            f"{len(_blocked_best) - _n_gap} recommendation(s) are Do Not Match / unsafe; "
+                            f"{_n_gap} need missing division data verified (accept those in Guided Mode)."
                         )
                     _accept_col1, _accept_col2 = st.columns([4, 1])
                     _accept_options = ["— select athlete —"] + sorted(
@@ -3908,11 +4435,11 @@ if data_ready:
 
                 if not export_action_plan.empty:
                     st.download_button(
-                        "📥 Download Action Plan CSV",
+                        "📥 Download Recommendation report CSV",
                         data=to_csv_bytes(export_action_plan),
-                        file_name="ez_brackets_action_plan.csv",
+                        file_name="ez_brackets_recommendation_report.csv",
                         mime="text/csv",
-                        help="Top recommendation for each problem division.",
+                        help="Top suggestion for each problem division. This is NOT your accepted Action Plan — use Copy Action Plan / Apply Mode for the staff checklist.",
                     )
 
                 st.download_button(
@@ -4082,7 +4609,7 @@ if data_ready:
                     if st.button("Revert", key="revert_move_btn"):
                         for _ri, (_idx, _m) in enumerate(_active_moves_for_revert):
                             if _revert_labels[_ri] == _revert_choice:
-                                st.session_state["moves"][_idx]["status"] = "Reverted"
+                                revert_move(st.session_state["moves"], _idx)
                                 break
                         st.rerun()
 
