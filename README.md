@@ -29,6 +29,8 @@ The older launcher in the parent `EZ_Brackets` folder launches a different, olde
 
 - CSV imports accept comma, semicolon, and tab separators; UTF-8, UTF-16 with a byte-order mark, and Windows-1252 text.
 - Include athlete name, division, team/academy, and approval status. Firstname + Lastname are recognized for Smoothcomp files.
+- Smoothcomp Auto-Detect accepts headings repeated after trimming whitespace and ignoring case. The first occurrence keeps its trimmed name; later occurrences receive numbered suffixes (for example `Weight`, `Weight [2]`, `WEIGHT [3]`), skipping names already in the file. All source columns and cell values remain in the imported frame; its `original_csv_headers` metadata records the exact original headings in order.
+- Auto-Detect continues to use the full `Group` division label for entry, skill/belt, age, and weight, rather than guessing among standalone/custom fields such as `Skill`/`SKILL` or `Weight`/`WEIGHT`. For repeated Group headings the first occurrence is used. Check the import preview if those fields disagree; an incomplete Group is not filled from duplicate fields. Blank headings remain invalid in both modes, and another system's Universal Mapping still rejects normalized duplicates.
 - For another system, map a full division field or its four parts: entry type, belt/experience, age, and weight.
 - Missing names/divisions and repeated names within one division block import to prevent ambiguous actions and incorrect counts. Distinguish different athletes with identical names before importing.
 - Kilogram labels convert to pounds. Labels without units are assumed to be pounds; verify those labels in the source.
@@ -61,5 +63,7 @@ Loading another file with progress offers **Same event · keep decisions** or **
 ```
 
 The suite tests imports, backup validation, projected counts, Copy/Move verification, matching exclusions, export handling, and Streamlit review/apply/restore flows. GitHub Actions runs it on push and pull requests once this branch is pushed.
+
+`tests/fixtures/smoothcomp_duplicate_headers.csv` uses the duplicate heading pattern from the September 30, 2026 Smoothcomp export with synthetic registrations. Conflicting custom values deliberately verify that the full Group label stays authoritative; no real athlete data is included.
 
 See [PRODUCT_READINESS.md](PRODUCT_READINESS.md) for the assessment, validation limits, and paid-launch work.
