@@ -25,7 +25,30 @@ RULE_LIMITS = {
 BOOL_RULES = {"set_only_approved", "set_allow_entry_crossover", "set_juvenile_adult_step_up"}
 
 
-def read_registration_csv(payload):
+def smoothcomp_column_names(header):
+    """Keep the first normalized heading; suffix repeats without stealing names.
+
+    Reserve every source heading before generating suffixes so, for example,
+    an existing 'Weight [2]' column is never overwritten by a second Weight.
+    """
+    reserved = {name.strip().casefold() for name in header}
+    used, names = set(), []
+    for original in header:
+        base = original.strip()
+        name = base
+        suffix = 2
+        if name.casefold() in used:
+            name = f"{base} [{suffix}]"
+            while name.casefold() in reserved or name.casefold() in used:
+                suffix += 1
+                name = f"{base} [{suffix}]"
+        used.add(name.casefold())
+        names.append(name)
+    return names
+
+
+def read_registration_csv(payload, *, smoothcomp=False):
+    """Read registrations; only Smoothcomp imports may disambiguate headings."""
     if not payload or not payload.strip():
         raise ValueError("This file is empty. Export the registrations again and choose the new CSV.")
     if len(payload) > MAX_FILE_BYTES:
@@ -46,7 +69,7 @@ def read_registration_csv(payload):
             delimiter = ","
         header = next(csv.reader(StringIO(text), delimiter=delimiter))
         normalized = [s.strip().casefold() for s in header]
-        if not all(normalized) or len(set(normalized)) != len(normalized):
+        if not all(normalized) or (not smoothcomp and len(set(normalized)) != len(normalized)):
             raise ValueError("Each CSV column needs a different, nonempty heading. Fix the headings and upload again.")
         # Pandas can otherwise reinterpret an extra field as an implicit index,
         # silently putting the wrong values under athlete/division headings.
@@ -55,7 +78,8 @@ def read_registration_csv(payload):
         for row_number, row in enumerate(reader, start=2):
             if row and len(row) != len(header):
                 raise ValueError(f"CSV row {row_number} has {len(row)} fields; the headings have {len(header)}. Export a fresh CSV or fix that row.")
-        frame = pd.read_csv(StringIO(text), sep=delimiter, dtype=str, keep_default_na=False)
+        names = smoothcomp_column_names(header) if smoothcomp else [s.strip() for s in header]
+        frame = pd.read_csv(StringIO(text), sep=delimiter, header=0, names=names, dtype=str, keep_default_na=False)
     except (UnicodeError, csv.Error, pd.errors.ParserError, pd.errors.EmptyDataError, StopIteration) as exc:
         raise ValueError("The CSV could not be read. Export a fresh CSV with one registration per row.") from exc
     frame.columns = frame.columns.str.strip()
@@ -64,6 +88,8 @@ def read_registration_csv(payload):
         raise ValueError("This CSV has headings but no registrations. Check the export filters and try again.")
     if len(frame) > MAX_REGISTRATIONS:
         raise ValueError("This version supports up to 25,000 registrations per file. Export a smaller event file.")
+    # Positional provenance includes original case and whitespace, even repeats.
+    frame.attrs["original_csv_headers"] = header
     return frame
 
 

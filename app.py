@@ -551,6 +551,8 @@ def normalize_entry_type(entry):
 
 
 def normalize_dataframe(raw_df):
+    # Smoothcomp's full Group label is authoritative. Standalone Entry/Skill/
+    # Belt/Age/Weight fields can include unrelated custom registration fields.
     df = raw_df.copy()
 
     group_col = find_col(df, ["group", "division", "bracket", "category"])
@@ -2556,7 +2558,7 @@ def render_load():
     uploaded = st.file_uploader("Choose your registrations CSV", type=["csv"], key="event_csv_upload", max_upload_size=15)
     if uploaded is not None:
         try:
-            raw = read_registration_csv(uploaded.getvalue())
+            raw = read_registration_csv(uploaded.getvalue(), smoothcomp=source == "Smoothcomp CSV")
         except ValueError as exc:
             st.error(str(exc))
             raw = None
